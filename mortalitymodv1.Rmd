@@ -26,7 +26,7 @@ per_comp <- merge(ses_code, cae_means, by.x= "SES", by.y = "idses")
 per_comp <- per_comp %>% mutate(comp_index = compmgts + compmgtsea + compmgtla) 
 per_comp2 <- per_comp[match(site.order, per_comp$SES.name),]
 
-compliance_scale <- as.vector(scale(per_comp2[,6]))
+noncompliance_scale <- as.vector(scale(per_comp2[,6]))
 ```
 # Poaching 
 poaching data- Take average of top 5 for all ses arenas and compare to model using combined average of all lakes and top 5 arenas 
@@ -174,7 +174,7 @@ data.bundle <- list(
   station_id = station_id,      
   n_stations = nrow(Wl_min_scaled),               
   Ff         = ff_scaled,
-  compliance = compliance_scale,
+  noncompliance = noncompliance_scale,
   poaching   = poach_scale,
   N_start    = N_start_realistic,
   arenas     = arenas,
@@ -267,11 +267,11 @@ model {
   sigma_r ~ dnorm(0, 1/pow(1.5,2))T(0,)       
   tau_r <- 1/pow(sigma_r, 2)
 
-  beta1 ~ dnorm(0, 1/pow(1.5,2))  
-  beta3 ~ dnorm(0, 1/pow(1.5,2))
-  beta5 ~ dnorm(0, 1/pow(1.5,2))
-  beta6 ~ dnorm(0.5, 1/pow(2,2))T(0,)  
-  beta7 ~ dnorm(0, 1/pow(1.5,2))
+  beta1 ~ dnorm(0, 1/pow(1.5,2)) #drought severity  
+  beta3 ~ dnorm(0, 1/pow(1.5,2)) #flooded forest
+  beta5 ~ dnorm(0.5, 1/pow(1.5,2))T(0,) #noncompliance
+  beta6 ~ dnorm(0.5, 1/pow(2,2))T(0,) 
+  beta7 ~ dnorm(0.5, 1/pow(1.5,2))T(0,) #poaching
 
 #---------------------------------------------------
 # Ecological Process model
@@ -281,10 +281,10 @@ for (j in 1:arenas) {
       
     r[j] ~ dnorm(r_mean, tau_r) 
   
-    logit(p_unrep[j]) <- beta5*compliance[j] + beta7*poaching[j]   #inform p.unreported with compliance + poaching
+    logit(p_unrep[j]) <- beta5*noncompliance[j] + beta7*poaching[j]   #inform p.unreported with compliance + poaching
     for (t in 2:(years)){
       
-      U[j,t] ~ dbin(p_unrep[j], (N[j,t-1] - E[j,t-1])) 
+      U[j,t] ~ dbin(p_unrep[j], N[j,t-1]) 
       #binomial(probability of unreported fishing, number of fish not already reported as catch)
 
       Ftot[j,t] <- E[j,t] + # reported catch
@@ -345,9 +345,9 @@ inits <- function() {
     r = rnorm(arenas, 0.05,0.02),
     beta1 = rnorm(1, 0, 0.1),
     beta3 = rnorm(1, 0, 0.1),
-    beta5 = rnorm(1, 0, 0.1),
+    beta5 = abs(rnorm(1, 0, 0.1)),
     beta6 = runif(1, 0.15, 0.25),
-    beta7 = rnorm(1, 0, 0.1)
+    beta7 = abs(rnorm(1, 0, 0.1))
   )
 }
 
