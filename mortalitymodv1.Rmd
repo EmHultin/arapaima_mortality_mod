@@ -1,0 +1,511 @@
+---
+title: "Chapter 2- mortality"
+output: pdf_document
+date: "2026-03-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Rule compliance
+using perceptions data from Cae 
+``` {r compliance}
+data4Emmav07 <- read.csv("data4Emmav07.csv")
+cae_data <- data4Emmav07[,64:67]
+cae_data[is.na(cae_data)] <- 0
+cae_means <- cae_data %>%
+  group_by(idses) %>%
+  summarise_all(mean, na.rm = TRUE) 
+
+codes <- readxl::read_xlsx("code_matching.xlsx")
+ses_code <- unique(codes[,4:5])
+
+per_comp <- merge(ses_code, cae_means, by.x= "SES", by.y = "idses")
+# which rule should we focus on? for now- making an index by summing across the 3
+per_comp <- per_comp %>% mutate(comp_index = compmgts + compmgtsea + compmgtla) 
+per_comp2 <- per_comp[match(site.order, per_comp$SES.name),]
+
+compliance_scale <- as.vector(scale(per_comp2[,6]))
+```
+# Poaching 
+poaching data- Take average of top 5 for all ses arenas and compare to model using combined average of all lakes and top 5 arenas 
+```{r poaching}
+library(dplyr)
+poach_raw <- read.csv("poaching_emma_lake.csv")
+# combine poaching days for each lake from high and low water season
+# take average of the top 5 lakes to create poaching index
+lake_sum <- poach_raw %>% group_by(lago, SES) %>% summarise(total_poach = sum(days_poached))
+
+result <- lake_sum %>%
+  group_by(SES) %>%
+  slice_max(order_by = total_poach, n = 5) %>%
+  summarise(avg_top5_poach = mean(total_poach))
+poach_scale <- as.vector(scale(result$avg_top5_poach)) 
+```
+# Ecological variables
+```{r catch/count}
+arenas <- 19 #all of them!
+years <- 5 #2018-2022, just the last 5
+count <- read.csv("smoothedcounts_v1.csv")
+count <- count[,-1]
+colnames(count) <- c("SES", 1999:2023)
+last5 <- count[,c(1,21:25)]
+
+catch= read.csv("catch_count_year_SES_12_3.csv")
+quota_catch <- catch[,c(1,4,7,8)]
+quota_catch <- quota_catch[-184,]
+c1 <- quota_catch[, c(1,2,4)]
+colnames(c1) <- c("SES", "year", "report_catchtotal")
+missing_mam <- read.csv("catch_count_year_SES.csv")
+mam_catch <- missing_mam[,c(1,6,9)]
+c2<- rbind(c1, mam_catch)
+c3<- dplyr::distinct(c2)
+c3.5<- c3[-c(138,140),]
+c4<- c3.5[order(c3.5$year, decreasing= FALSE),]
+c5 <- tidyr::pivot_wider(c4, names_from = "year", values_from = "report_catchtotal")
+
+site.order <- unique(c5$SES[1:19])
+C <- last5[match(site.order, last5$SES), ]
+C <- round(last5[,2:6]) # 2018:2022
+
+E <- c5[1:19, c(1,21:25)]
+E[is.na(E)] <- 0
+E <- as.matrix(E[,-1])
+storage.mode(E) <- "numeric"
+
+#proportion of total lake area surveyed each year
+prop_surveyed <- read.csv("propSES_surveyed_byyear_FIXED.csv")
+prop_surveyed <- prop_surveyed[match(site.order, prop_surveyed$SES),] 
+P <- prop_surveyed[,c(1,21:25)] 
+P[is.na(P)] <- 0
+P <- as.matrix(P[,-1])
+storage.mode(P) <- "numeric"
+```
+```{r min water level}
+library(dplyr)
+min_wl_bySES <- read.csv("min_wl_ses.csv")
+min_wl <- min_wl_bySES[1:19, -2]
+colnames(min_wl) <- c("SES", 1995:2023)
+min_wl <- min_wl[match(site.order, min_wl$SES), ]
+
+######
+Codigo  <- c("12351000", "13150003", "12872000")
+Estacao <- c("FB", "CO", "MA")
+stations <- data.frame(Codigo = Codigo, Estacao = Estacao)
+
+# ANA station names as they appear in list_stations.xlsx, matched to Estacao codes
+station_names <- data.frame(
+  ANA.station = c("Fonte Boa", "Coari", "Maraa"),
+  Estacao     = c("FB", "CO", "MA")
+)
+
+ses_lookup <- readxl::read_excel("list_stations.xlsx") %>%
+  filter(!is.na(SES)) %>%
+  left_join(station_names, by = "ANA.station") %>%
+  select(SES, Estacao)
+
+station_key <- data.frame(
+  Estacao    = Estacao,
+  station_id = seq_along(Estacao)
+)
+
+station_id <- min_wl %>%
+  mutate(SES = site.order) %>%
+  left_join(ses_lookup, by = "SES") %>%
+  left_join(station_key, by= "Estacao") %>%
+  pull(station_id)
+
+Wl_min_raw <- as.matrix(
+  min_wl[1:19, ] %>%
+    left_join(ses_lookup, by = "SES") %>%
+    distinct(Estacao, .keep_all = TRUE) %>%
+    slice(match(station_key$Estacao, Estacao)) %>%
+    select(as.character(2016:2020)))
+
+rownames(Wl_min_raw) <- station_key$Estacao
+Wl_min_scaled <- t(scale(t(Wl_min_raw)))
+```
+```{r flooded forest}
+library(dplyr)
+hess_habs <- readxl::read_xls("hess_4k_pixels.xls")
+hess <- hess_habs %>% mutate(totalpix = (C_0+C_1+C_11+C_13+C_21+C_33+C_44+C_51+C_67+C_77+C_88+C_89+C_99+C_200+C_255),
+                        p_floodforest= ((C_77+C_89+C_99)/totalpix))
+hess_trim <- hess[2:20,c(2,23)]
+colnames(hess_trim) <- c("SES", "p_ff")
+hess_trim <- hess_trim %>% mutate(pct_ff = p_ff *100)
+hess_tiny <- hess_trim[,c(1,3)]
+colnames(hess_tiny) <- c("SES", "Percent area flooded forest")
+
+hess_final <- na.omit(hess_tiny[match(site.order, hess_tiny$SES), ])
+
+
+max_wl_bySES <- read.csv("max_wl_bySES.csv")
+max_wl <- max_wl_bySES[1:19, c(1,25:29)]
+colnames(max_wl) <- c( "SES", 2016:2020)
+Wl_max_raw <- max_wl[match(site.order, max_wl$SES), ]
+
+Wl_max_plus <- left_join(Wl_max_raw, hess_tiny, by = "SES")
+# Step 3: multiply each year column by the percent area flooded forest
+year_cols <- as.character(2016:2020)
+Wl_flood <- Wl_max_plus
+Wl_flood[, year_cols] <- Wl_max_plus[, year_cols] * 
+                          (Wl_max_plus$`Percent area flooded forest` / 100)
+
+ff_matrix <- as.matrix(Wl_flood[, year_cols])
+rownames(ff_matrix) <- Wl_flood$SES
+ff_scaled <- t(scale(t(ff_matrix)))
+
+```
+# Model
+```{r data bundle/initial sim}
+N_start_realistic <- numeric(arenas)
+
+for(j in 1:arenas) {
+  obs_counts <- C[j, ]
+  max_count <- max(obs_counts, na.rm=TRUE)
+  N_start_realistic[j] <- max_count * 4
+} 
+data.bundle <- list(
+  C          = C,
+  p_area     = P,
+  E          = E,
+  Minw       = Wl_min_scaled,   
+  station_id = station_id,      
+  n_stations = nrow(Wl_min_scaled),               
+  Ff         = ff_scaled,
+  compliance = compliance_scale,
+  poaching   = poach_scale,
+  N_start    = N_start_realistic,
+  arenas     = arenas,
+  years      = years
+)
+
+# Simulate reasonable parameter values
+p_sim <- 0.7  # Fix detection at 0.7
+beta6_sim <- 0.5  # Fix availability parameter at 0.5
+
+# Initialize matrices
+N_sim <- matrix(NA, nrow = arenas, ncol = years)
+M_sim <- matrix(NA, nrow = arenas, ncol = years)
+
+for (j in 1:arenas) {
+  for (t in 1:years) {
+    
+    # Back-calculate M from C
+    # C ~ Binomial(M, p_detect)
+    # So M ~ C / p_detect
+    if (C[j, t] > 0) {
+      M_sim[j, t] <- max(round(C[j, t] / p_sim), C[j, t] + 5)
+    } else {
+      # When count is 0, assume small population was present but not detected
+      # Use harvest as a clue - if harvest occurred, population must have existed
+      if (E[j, t] > 0) {
+        M_sim[j, t] <- max(round(E[j, t] * 1.5), 20)
+      } else {
+        M_sim[j, t] <- round(runif(1, 10, 50))
+      }
+    }
+    
+    # Back-calculate N from M
+    # M ~ Binomial(N, w) where w = ilogit(-beta6 * p_area)
+    w_sim <- 1 / (1 + exp(beta6_sim * P[j, t]))
+    w_sim <- max(w_sim, 0.1)  # Prevent division by very small numbers
+    
+    N_sim[j, t] <- max(round(M_sim[j, t] / w_sim), M_sim[j, t] + 10)
+    
+    # Step 3: Ensure N can support harvest
+    # Population must be large enough to sustain the harvest
+    if (E[j, t] > 0) {
+      N_min_for_harvest <- E[j, t] * 2  # Population should be at least 2x harvest
+      N_sim[j, t] <- max(N_sim[j, t], N_min_for_harvest)
+      # Also update M to maintain hierarchy
+      M_sim[j, t] <- max(M_sim[j, t], round(N_min_for_harvest * 0.6))
+    }
+  }
+}
+
+# Final validation and corrections
+
+# Ensure all values are positive integers
+N_sim <- round(pmax(N_sim, 10))
+M_sim <- round(pmax(M_sim, 5))
+
+# Enforce hierarchy: N >= M >= C
+for (j in 1:arenas) {
+  for (t in 1:years) {
+    # Ensure M <= N
+    if (M_sim[j, t] > N_sim[j, t]) {
+      N_sim[j, t] <- M_sim[j, t] + 10
+    }
+    
+    # Ensure C <= M
+    if (C[j, t] > M_sim[j, t]) {
+      M_sim[j, t] <- C[j, t] + 5
+      N_sim[j, t] <- max(N_sim[j, t], M_sim[j, t] + 10)
+    }
+  }
+}
+
+# Convert to numeric matrices (required by JAGS)
+storage.mode(N_sim) <- "numeric"
+storage.mode(M_sim) <- "numeric"
+
+```
+3 tier model
+```{r}
+library(rjags)
+library(jagsUI)
+
+modfile <- tempfile()
+writeLines("
+model {
+  #---------------------------------------------------
+  # Priors
+  #---------------------------------------------------
+  r_mean ~ dnorm(0.05, 1/pow(1.5,2))
+  sigma_r ~ dnorm(0, 1/pow(1.5,2))T(0,)       
+  tau_r <- 1/pow(sigma_r, 2)
+
+  beta1 ~ dnorm(0, 1/pow(1.5,2))  
+  beta3 ~ dnorm(0, 1/pow(1.5,2))
+  beta5 ~ dnorm(0, 1/pow(1.5,2))
+  beta6 ~ dnorm(0.5, 1/pow(2,2))T(0,)  
+  beta7 ~ dnorm(0, 1/pow(1.5,2))
+
+#---------------------------------------------------
+# Ecological Process model
+#---------------------------------------------------
+for (j in 1:arenas) {
+      N[j,1] ~ dpois(N_start[j]) 
+      
+    r[j] ~ dnorm(r_mean, tau_r) 
+  
+    logit(p_unrep[j]) <- beta5*compliance[j] + beta7*poaching[j]   #inform p.unreported with compliance + poaching
+    for (t in 2:(years)){
+      
+      U[j,t] ~ dbin(p_unrep[j], (N[j,t-1] - E[j,t-1])) 
+      #binomial(probability of unreported fishing, number of fish not already reported as catch)
+
+      Ftot[j,t] <- E[j,t] + # reported catch
+                U[j,t] # rule breaking and poaching 
+      
+      N_post_harvest[j,t] <- N[j,t-1] - Ftot[j,t]
+      
+      # Growth to next year
+     growth_rate[j,t] <- r[j] + 
+     (beta1 * Minw[station_id[j],t]) + 
+     (beta3 * Ff[j,t]) 
+      
+      N_expected[j,t] <- N_post_harvest[j,t] * exp(growth_rate[j,t])
+      N[j,t] ~ dpois(N_expected[j,t])
+    }
+}
+  #---------------------------------------------------
+  # Proportion of the population actually sampled
+  #---------------------------------------------------
+ for (j in 1:arenas){
+    for (t in 1:years){
+      w[j,t] <- ilogit(-beta6 * p_area[j,t]) 
+      M[j,t] ~ dbin(w[j,t], N[j,t])
+    }
+  }
+  #---------------------------------------------------
+  # Observation model for C (counts) - regular binomial 
+  #---------------------------------------------------
+    p_obs ~ dbeta(14,6)
+
+for (j in 1:arenas) {
+    for (t in 1:years){
+      
+      C[j,t] ~ dbin(p_obs , M[j,t])
+    }
+  }
+  
+  #---------------------------------------------------
+  # Derived quantities
+  #---------------------------------------------------
+  for (j in 1:arenas) {
+    for (t in 1:(years-1)) {
+    lambda[j,t+1] <- N[j,t+1]/N[j,t]
+    }
+  }
+}
+
+", con = modfile)
+
+# Initialization function
+inits <- function() {
+  
+  list(
+    N = N_sim,
+    M = M_sim,
+    r_mean = rnorm(1, 0.05, 0.02),
+    sigma_r = runif(1, 0.1, 0.3),
+    r = rnorm(arenas, 0.05,0.02),
+    beta1 = rnorm(1, 0, 0.1),
+    beta3 = rnorm(1, 0, 0.1),
+    beta5 = rnorm(1, 0, 0.1),
+    beta6 = runif(1, 0.15, 0.25),
+    beta7 = rnorm(1, 0, 0.1)
+  )
+}
+
+# Parameters to monitor
+parameters <- c("lambda", "N", "M", "r", "U", "beta6", 
+                "beta1", "beta3", "beta5", "beta7")
+
+out <- jags(data = data.bundle,
+            inits = inits,
+            parameters.to.save = parameters,
+            model.file = modfile,
+            n.chains = 3,
+            n.adapt = 30000,
+            n.iter = 200000,
+            n.burnin = 100000,
+            n.thin = 75,
+            parallel = TRUE)
+
+traceplot(out, parameters = parameters)
+```
+Diagnostics
+```{r, echo=FALSE}
+#install.packages("jagshelper")
+library(jagshelper)
+
+key_params <- c("beta1", "beta3", "beta5", "beta6", "beta7")
+
+for (param in key_params) {
+  if (param %in% rownames(out$summary)) {
+    cat("\n", param, ":\n", sep="")
+    param_summary <- out$summary[param, ]
+    print(round(param_summary, 4))
+  } else {
+    cat("\n", param, ": NOT FOUND\n", sep="")
+  }
+}
+
+check_neff(out, 200)
+
+check_Rhat(out)
+
+if ("mean" %in% names(out)) {
+  cat("\nParameter means:\n")
+  for (param in key_params) {
+    if (param %in% names(out$mean)) {
+      cat(sprintf("  %-12s = %8.4f\n", param, out$mean[[param]]))
+    }
+  }
+}
+
+if ("sd" %in% names(out)) {
+  cat("\nParameter SDs:\n")
+  for (param in key_params) {
+    if (param %in% names(out$sd)) {
+      cat(sprintf("  %-12s = %8.4f\n", param, out$sd[[param]]))
+    }
+  }
+}
+
+```
+Plots
+```{r}
+library(bayesplot)
+library(ggplot2)
+library(tidyverse)
+library(stringr)
+
+posterior <- as.matrix(out$samples)
+
+# Interval plots
+beta_params <- c("beta1", "beta2", "beta3", "beta4", "beta5", "beta7")
+
+mcmc_intervals(posterior, pars = beta_params)+
+  scale_y_discrete(labels = c(
+    "beta1" = "Drought Severity",
+    "beta2" = "Connectivity",
+    "beta3" = "Flooded Forest Cover",
+    "beta4" = "Lake Surface Area"
+  ))+
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Posterior estimates for covariate effects",
+       subtitle = "50% and 95% credible intervals")
+# Density plots
+mcmc_areas(posterior, pars = beta_params,
+           prob = 0.95) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Posterior density distributions",
+       subtitle = "Shaded area = 95% credible interval")
+
+
+#lambda trends
+lambda_cols <- grep("lambda", colnames(posterior), value = TRUE)
+
+lambda_df <- posterior[, lambda_cols] %>%
+  as.data.frame() %>%
+  # Summarize posterior to median + credible intervals per parameter
+  summarise(across(everything(), list(
+    median = ~median(.),
+    lower  = ~quantile(., 0.025),
+    upper  = ~quantile(., 0.975)
+  ))) %>%
+  pivot_longer(everything(),
+               names_to  = c("param", ".value"),
+               names_pattern = "(.+)_(median|lower|upper)") %>%
+  # Parse arena and year out of the parameter name
+  # Adjust regex to match your naming convention e.g. "lambda[year,arena]"
+  mutate(
+    arena = str_extract(param, "(?<=,)\\d+(?=\\])") %>% as.integer(),
+    year  = str_extract(param, "(?<=\\[)\\d+") %>% as.integer()
+  )
+
+arena_lookup <- c(
+  "1"  = "JA",
+  "2"  = "CO",
+  "3"  = "BC",
+  "4"  = "CS",
+  "5"  = "CR",
+  "6"  = "MU",
+  "7"  = "VE",
+  "8"  = "PV",
+  "9"  = "MI",
+  "10" = "JC",
+  "11" = "CA",
+  "12" = "SJ",
+  "13" = "CV",
+  "14" = "SE",
+  "15" = "JG",
+  "16" = "NP",
+  "17" = "PP",
+  "18" = "SS",
+  "19" = "JF"
+)
+
+# Define year mapping - 17 years from 2006 to 2022
+year_lookup <- setNames(2006:2022, 1:17)
+
+lambda_df <- lambda_df %>%
+  mutate(
+    actual_year  = year_lookup[as.character(year)],
+    arena_code   = arena_lookup[as.character(arena)]
+  )
+
+ggplot(lambda_df, aes(x = actual_year, y = median, 
+                      group = arena_code, color = arena_code)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = arena_code), 
+              alpha = 0.15, color = NA) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d() +
+  scale_x_continuous(breaks = 2006:2022) +
+  labs(
+    title = "Annual population growth rate (lambda) by SES arena",
+    x     = "Year",
+    y     = "Lambda",
+    color = "Arena",
+    fill  = "Arena"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
