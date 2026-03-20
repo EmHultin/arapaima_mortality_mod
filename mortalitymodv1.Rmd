@@ -12,10 +12,15 @@ knitr::opts_chunk$set(echo = TRUE)
 library(dplyr)
 
 site.order <- c("JA", "CO", "BC" ,"CS" ,"CR" ,"MU", "VE" ,"PV" ,"MI", "JC", "CA" ,"SJ", "CV", "SE", "JG" ,"NP" ,"PP" ,"SS" ,"JF")
+#laptop
+#r_prior_df_eco <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/r_arena_priors.rds")
+#r_hyperpriors  <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/r_hyperpriors.rds")
+#beta_priors    <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/beta_priors.rds")
 
-r_prior_df_eco <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/r_arena_priors.rds")
-r_hyperpriors  <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/r_hyperpriors.rds")
-beta_priors    <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/beta_priors.rds")
+#desktop
+r_prior_df_eco <- readRDS("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/priors/r_arena_priors.rds")
+r_hyperpriors  <- readRDS("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/priors/r_hyperpriors.rds")
+beta_priors    <- readRDS("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/priors/beta_priors.rds")
 
 # Build full 19-arena frame
 r_prior_df <- data.frame(arena = site.order) %>%
@@ -49,7 +54,7 @@ per_comp2 <- per_comp[match(site.order, per_comp$SES.name),]
 noncompliance_scale <- as.vector(scale(per_comp2[,6]))
 ```
 # Poaching 
-poaching data- Take average of top 5 for all ses arenas and compare to model using combined average of all lakes and top 5 arenas 
+poaching data- Take average of top 5 poached lakes for all ses arenas
 ```{r poaching}
 library(dplyr)
 poach_raw <- read.csv("poaching_emma_lake.csv")
@@ -622,18 +627,19 @@ nimble_code <- nimbleCode({
   beta3       ~ dnorm(beta3_prior, sd = beta3_prior_sd)
   beta5       ~ dnorm(0.5, sd = 1.5)     
   beta7       ~ dnorm(0.5, sd = 1.5)      
-  beta6       ~ dnorm(0.5, sd = 2)  
+  #beta6       ~ dnorm(0.5, sd = 2)  
   
   mu_unrep    ~ dnorm(0, sd = 1.5)
   sigma_unrep ~ dnorm(0, sd = 1)          
   tau_unrep   <- 1/pow(sigma_unrep, 2)
   
 # Ecological Process model
-for (j in 1:arenas) {
+    for (j in 1:arenas) {
       N[j,1] ~ dpois(N_start[j]) 
       r[j] ~ dnorm(r_mean, sigma_r) 
       alpha_unrep[j] ~ dnorm(mu_unrep, sigma_unrep)  # arena-level baseline iuu
-      logit(p_unrep[j]) <- alpha_unrep[j] + beta5*noncompliance[j] + beta7*poaching[j] #inform p.unreported with compliance + poaching
+      logit(p_unrep[j]) <- alpha_unrep[j] + beta5*noncompliance[j] + beta7*poaching[j] 
+          #inform p.unreported with compliance + poaching
     
     for (t in 2:(years)){
       
@@ -655,9 +661,9 @@ for (j in 1:arenas) {
 }
 
   # Proportion of the population actually sampled
- for (j in 1:arenas){
+    for (j in 1:arenas){
     for (t in 1:years){
-      w[j,t] <- ilogit(-beta6 * p_area[j,t]) 
+      w[j,t] <- ilogit(-beta6_fixed * p_area[j,t]) 
       M[j,t] ~ dbin(w[j,t], N[j,t])
     }
   }
@@ -666,7 +672,7 @@ for (j in 1:arenas) {
 
     p_obs ~ dbeta(14,6)
 
-for (j in 1:arenas) {
+    for (j in 1:arenas) {
     for (t in 1:years){
       
       C[j,t] ~ dbin(p_obs , M[j,t])
@@ -675,7 +681,7 @@ for (j in 1:arenas) {
   
 
   # Derived quantities
-  for (j in 1:arenas) {
+    for (j in 1:arenas) {
     for (t in 1:(years-1)) {
     lambda[j,t+1] <- N[j,t+1]/N[j,t]
     }
@@ -701,7 +707,8 @@ nimble_model <- nimbleModel(
   beta1_prior     = beta_priors$beta1_mean,
   beta1_prior_sd  = beta_priors$beta1_sd * 2,
   beta3_prior     = beta_priors$beta3_mean,
-  beta3_prior_sd  = beta_priors$beta3_sd * 2
+  beta3_prior_sd  = beta_priors$beta3_sd * 2,
+  beta6_fixed     = beta_priors$beta6_fixed
 ),
   inits   = list(
     N           = N_sim,
@@ -713,7 +720,7 @@ nimble_model <- nimbleModel(
     beta1       = 0,
     beta3       = 0,
     beta5       = 0.5,
-    beta6       = 0.2,
+   # beta6       = 0.2,
     beta7       = 0.5,
     mu_unrep    = 0,
     sigma_unrep = 0.3,
@@ -756,8 +763,7 @@ library(ggplot2)
 
 posterior_matrix <- as.matrix(samples_coda)
 
-key_params <- c("beta1", "beta3", "beta5", "beta6", "beta7",
-                "mu_unrep", "sigma_unrep")
+key_params <- c("beta1", "beta3", "beta5", "beta7","mu_unrep", "sigma_unrep")
 
 # Rhat and n.eff
 gelman <- gelman.diag(samples_coda, multivariate = FALSE)
@@ -788,4 +794,308 @@ mcmc_areas(posterior_matrix, pars = key_params, prob = 0.95) +
 sum_stats <- summary(samples_coda)
 print(round(sum_stats$statistics[key_params, ], 4))
 print(round(sum_stats$quantiles[key_params, ], 4))
+```
+Simplified nimble - no covariates
+```{r}
+nimble_code_m2 <- nimbleCode({
+  r_mean      ~ dnorm(r_mean_prior, sd = r_mean_prior_sd)
+  sigma_r     ~ T(dnorm(sigma_r_prior, sd = sigma_r_prior_sd), 0, Inf)
+  tau_r       <- 1/pow(sigma_r, 2)
+  beta1       ~ dnorm(beta1_prior, sd = beta1_prior_sd)
+  beta3       ~ dnorm(beta3_prior, sd = beta3_prior_sd)
+  
+  # Single global p_unrep - no covariates yet
+  mu_unrep    ~ dnorm(0, sd = 1.5)
+  sigma_unrep ~ T(dnorm(0, sd = 1), 0, Inf)
+
+  for(j in 1:arenas) {
+    r[j]           ~ dnorm(r_prior[j], sd = r_prior_sd[j])
+    N[j,1]         ~ dpois(N_start[j])
+    alpha_unrep[j] ~ dnorm(mu_unrep, sd = sigma_unrep)
+    logit(p_unrep[j]) <- alpha_unrep[j]  # no covariates
+
+    for(t in 2:years) {
+      U[j,t]              ~ dbin(p_unrep[j], N[j,t-1] - E[j,t])
+      Ftot[j,t]           <- E[j,t] + U[j,t]
+      N_post_harvest[j,t] <- N[j,t-1] - Ftot[j,t]
+      growth_rate[j,t]    <- r[j] + 
+                             beta1*Minw[station_id[j],t] + 
+                             beta3*Ff[j,t]
+      N_expected[j,t]     <- N_post_harvest[j,t] * exp(growth_rate[j,t])
+      N[j,t]              ~ dpois(N_expected[j,t])
+    }
+  }
+
+  for(j in 1:arenas) {
+    for(t in 1:years) {
+      w[j,t] <- ilogit(-beta6_fixed * p_area[j,t])
+      M[j,t] ~ dbin(w[j,t], N[j,t])
+      C[j,t] ~ dbin(p_obs, M[j,t])
+    }
+  }
+
+  p_obs ~ dbeta(14, 6)
+
+  for(j in 1:arenas) {
+    for(t in 2:years) {
+      lambda[j,t] <- N[j,t] / N[j,t-1]
+    }
+  }
+})
+
+nimble_model_m2 <- nimbleModel(
+  code    = nimble_code_m2,
+  data    = list(C = C, E = E, p_area = P, Minw = Wl_min_scaled,
+                 Ff = ff_scaled, noncompliance = noncompliance_scale,
+                 poaching = poach_scale),
+  constants = list(
+  arenas          = arenas,
+  years           = years,
+  station_id      = station_id,
+  N_start         = N_start_realistic,
+  r_prior         = r_prior,
+  r_prior_sd      = r_prior_sd,
+  r_mean_prior    = r_hyperpriors$r_mean_est,
+  r_mean_prior_sd = r_hyperpriors$r_mean_sd * 2,
+  sigma_r_prior   = r_hyperpriors$sigma_r_est,
+  sigma_r_prior_sd = r_hyperpriors$sigma_r_sd * 2,
+  beta1_prior     = beta_priors$beta1_mean,
+  beta1_prior_sd  = beta_priors$beta1_sd * 2,
+  beta3_prior     = beta_priors$beta3_mean,
+  beta3_prior_sd  = beta_priors$beta3_sd * 2,
+  beta6_fixed     = beta_priors$beta6_fixed
+),
+  inits   = list(
+    N           = N_sim,
+    M           = M_sim,
+    U           = U_sim,
+    r_mean      = 0.05,
+    sigma_r     = 0.2,
+    r           = rep(0.05, arenas),
+    beta1       = 0,
+    beta3       = 0,
+    beta5       = 0.5,
+   # beta6       = 0.2,
+    beta7       = 0.5,
+    mu_unrep    = 0,
+    sigma_unrep = 0.3,
+    alpha_unrep = rep(0, arenas),
+    p_obs       = 0.7
+  )
+)
+# Configure joint sampler on N and U together
+conf2 <- configureMCMC(nimble_model_m2)
+conf2$removeSamplers(c("N", "U"))
+
+for(j in 1:arenas) {
+  conf$addSampler(target = paste0("N[", j, ", 1]"), type = "slice")
+  for(t in 2:years) {
+    # Sample U and N jointly at each time step
+    conf$addSampler(target = c(paste0("U[", j, ",", t, "]"),
+                               paste0("N[", j, ",", t, "]")),
+                    type = "AF_slice")  # AF_slice handles mixed discrete/continuous
+  }
+}
+
+
+mcmc2 <- buildMCMC(conf2)
+compiled_model2 <- compileNimble(nimble_model_m2)
+compiled_mcmc2  <- compileNimble(mcmc2, project = nimble_model_m2)
+
+samples2 <- runMCMC(compiled_mcmc2,
+                   niter   = 200000,
+                   nburnin = 100000,
+                   thin    = 75,
+                   nchains = 3)
+library(coda)
+samples_coda2 <- as.mcmc.list(lapply(samples2, as.mcmc))
+
+#Outputs
+posterior_matrix2 <- as.matrix(samples_coda2)
+
+key_params2 <- c("beta1", "beta3", "beta5", "beta7","mu_unrep", "sigma_unrep")
+
+# Rhat and n.eff
+gelman2 <- gelman.diag(samples_coda2, multivariate = FALSE)
+eff2    <- effectiveSize(samples_coda2)
+
+cat("=== Convergence diagnostics ===\n")
+for(p in key_params2) {
+  idx <- grep(paste0("^", p, "$"), rownames(gelman2$psrf))
+  if(length(idx) > 0) {
+    cat(sprintf("%-15s Rhat: %.4f   n.eff: %.0f\n",
+                p, gelman2$psrf[idx, 1], eff2[idx]))
+  }
+}
+
+# Traceplots
+mcmc_trace(posterior_matrix2, pars = key_params)
+
+# Posterior intervals
+mcmc_intervals(posterior_matrix2, pars = c("beta1", "beta3")) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Posterior estimates for growth covariates")
+
+# Density plots
+mcmc_areas(posterior_matrix2, pars = key_params, prob = 0.95) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red")
+
+# Posterior summary table
+sum_stats2 <- summary(samples_coda2)
+print(round(sum_stats2$statistics[key_params2, ], 4))
+print(round(sum_stats2$quantiles[key_params2, ], 4))
+```
+Model 3 - testing where identifiability breaks down
+```{r}
+nimble_code_m3 <- nimbleCode({
+  r_mean      ~ dnorm(r_mean_prior, sd = r_mean_prior_sd)
+  sigma_r     ~ T(dnorm(sigma_r_prior, sd = sigma_r_prior_sd), 0, Inf)
+  tau_r       <- 1/pow(sigma_r, 2)
+  beta1       ~ dnorm(beta1_prior, sd = beta1_prior_sd)
+  beta3       ~ dnorm(beta3_prior, sd = beta3_prior_sd)
+
+  # Add social covariates but keep growth covariates
+  mu_unrep    ~ dnorm(0, sd = 1.5)
+  sigma_unrep ~ T(dnorm(0, sd = 1), 0, Inf)
+  beta5       ~ T(dnorm(0.5, sd = 1.5), 0, Inf)
+  beta7       ~ T(dnorm(0.5, sd = 1.5), 0, Inf)
+
+  for(j in 1:arenas) {
+    r[j]           ~ dnorm(r_prior[j], sd = r_prior_sd[j])
+    N[j,1]         ~ dpois(N_start[j])
+    alpha_unrep[j] ~ dnorm(mu_unrep, sd = sigma_unrep)
+    logit(p_unrep[j]) <- alpha_unrep[j] + 
+                         beta5*noncompliance[j] + 
+                         beta7*poaching[j]
+
+    for(t in 2:years) {
+      U[j,t]              ~ dbin(p_unrep[j], N[j,t-1] - E[j,t])
+      Ftot[j,t]           <- E[j,t] + U[j,t]
+      N_post_harvest[j,t] <- N[j,t-1] - Ftot[j,t]
+      growth_rate[j,t]    <- r[j] +
+                             beta1*Minw[station_id[j],t] +
+                             beta3*Ff[j,t]
+      N_expected[j,t]     <- N_post_harvest[j,t] * exp(growth_rate[j,t])
+      N[j,t]              ~ dpois(N_expected[j,t])
+    }
+  }
+
+  for(j in 1:arenas) {
+    for(t in 1:years) {
+      w[j,t] <- ilogit(-beta6_fixed * p_area[j,t])
+      M[j,t] ~ dbin(w[j,t], N[j,t])
+      C[j,t] ~ dbin(p_obs, M[j,t])
+    }
+  }
+
+  p_obs ~ dbeta(14, 6)
+
+  for(j in 1:arenas) {
+    for(t in 2:years) {
+      lambda[j,t] <- N[j,t] / N[j,t-1]
+    }
+  }
+})
+
+nimble_model_m3 <- nimbleModel(
+  code    = nimble_code_m3,
+  data    = list(C = C, E = E, p_area = P, Minw = Wl_min_scaled,
+                 Ff = ff_scaled, noncompliance = noncompliance_scale,
+                 poaching = poach_scale),
+  constants = list(
+  arenas          = arenas,
+  years           = years,
+  station_id      = station_id,
+  N_start         = N_start_realistic,
+  r_prior         = r_prior,
+  r_prior_sd      = r_prior_sd,
+  r_mean_prior    = r_hyperpriors$r_mean_est,
+  r_mean_prior_sd = r_hyperpriors$r_mean_sd * 2,
+  sigma_r_prior   = r_hyperpriors$sigma_r_est,
+  sigma_r_prior_sd = r_hyperpriors$sigma_r_sd * 2,
+  beta1_prior     = beta_priors$beta1_mean,
+  beta1_prior_sd  = beta_priors$beta1_sd * 2,
+  beta3_prior     = beta_priors$beta3_mean,
+  beta3_prior_sd  = beta_priors$beta3_sd * 2,
+  beta6_fixed     = beta_priors$beta6_fixed
+),
+  inits   = list(
+    N           = N_sim,
+    M           = M_sim,
+    U           = U_sim,
+    r_mean      = 0.05,
+    sigma_r     = 0.2,
+    r           = rep(0.05, arenas),
+    beta1       = 0,
+    beta3       = 0,
+    beta5       = 0.5,
+   # beta6       = 0.2,
+    beta7       = 0.5,
+    mu_unrep    = 0,
+    sigma_unrep = 0.3,
+    alpha_unrep = rep(0, arenas),
+    p_obs       = 0.7
+  )
+)
+# Configure joint sampler on N and U together
+conf3 <- configureMCMC(nimble_model_m3)
+conf3$removeSamplers(c("N", "U"))
+
+for(j in 1:arenas) {
+  conf$addSampler(target = paste0("N[", j, ", 1]"), type = "slice")
+  for(t in 2:years) {
+    # Sample U and N jointly at each time step
+    conf$addSampler(target = c(paste0("U[", j, ",", t, "]"),
+                               paste0("N[", j, ",", t, "]")),
+                    type = "AF_slice")  # AF_slice handles mixed discrete/continuous
+  }
+}
+
+
+mcmc3 <- buildMCMC(conf3)
+compiled_model3 <- compileNimble(nimble_model_m3)
+compiled_mcmc3  <- compileNimble(mcmc3, project = nimble_model_m3)
+
+samples3 <- runMCMC(compiled_mcmc3,
+                   niter   = 200000,
+                   nburnin = 100000,
+                   thin    = 75,
+                   nchains = 3)
+library(coda)
+samples_coda3 <- as.mcmc.list(lapply(samples3, as.mcmc))
+
+#Outputs
+posterior_matrix3 <- as.matrix(samples_coda3)
+
+key_params3 <- c("beta1", "beta3", "beta5", "beta7","mu_unrep", "sigma_unrep")
+
+# Rhat and n.eff
+gelman3 <- gelman.diag(samples_coda3, multivariate = FALSE)
+eff3    <- effectiveSize(samples_coda3)
+
+cat("=== Convergence diagnostics ===\n")
+for(p in key_params3) {
+  idx <- grep(paste0("^", p, "$"), rownames(gelman3$psrf))
+  if(length(idx) > 0) {
+    cat(sprintf("%-15s Rhat: %.4f   n.eff: %.0f\n",
+                p, gelman3$psrf[idx, 1], eff3[idx]))
+  }
+}
+
+# Traceplots
+mcmc_trace(posterior_matrix3, pars = key_params)
+
+# Posterior intervals
+mcmc_intervals(posterior_matrix3, pars = c("beta1", "beta3")) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Posterior estimates for growth covariates")
+
+# Density plots
+mcmc_areas(posterior_matrix3, pars = key_params, prob = 0.95) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red")
+
+# Posterior summary table
+sum_stats3 <- summary(samples_coda3)
+print(round(sum_stats3$statistics[key_params3, ], 4))
+print(round(sum_stats3$quantiles[key_params3, ], 4))
 ```
