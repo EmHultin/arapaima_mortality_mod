@@ -247,13 +247,26 @@ for (j in 1:arenas) {
   }
 }
 
+U_sim <- matrix(NA, nrow = arenas, ncol = years)
+p_unrep_start <- 0.05
+logit_start   <- log(p_unrep_start / (1 - p_unrep_start))  # -2.944
+
+# Rebuild U_sim consistent with p_unrep_start
+U_sim <- matrix(NA, nrow = arenas, ncol = years)
+for(j in 1:arenas) {
+  for(t in 2:years) {
+    avail      <- max(N_sim[j,t-1] - E[j,t], 0)
+    U_sim[j,t] <- min(round(avail * p_unrep_start), avail)
+  }
+}
+
 # Convert to numeric matrices (required by JAGS)
 storage.mode(N_sim) <- "numeric"
 storage.mode(M_sim) <- "numeric"
-
+storage.mode(U_sim) <- "numeric"
 ```
 3 tier model
-```{r}
+```{r JAGS full}
 library(rjags)
 library(jagsUI)
 
@@ -270,25 +283,28 @@ model {
   beta1 ~ dnorm(0, 1/pow(1.5,2)) #drought severity  
   beta3 ~ dnorm(0, 1/pow(1.5,2)) #flooded forest
   beta5 ~ dnorm(0.5, 1/pow(1.5,2))T(0,) #noncompliance
-  beta6 ~ dnorm(0.5, 1/pow(2,2))T(0,) 
   beta7 ~ dnorm(0.5, 1/pow(1.5,2))T(0,) #poaching
-
+  beta6 ~ dnorm(0.5, 1/pow(2,2))T(0,) 
+  
+  mu_unrep    ~ dnorm(0, 1/pow(1.5,2))
+  sigma_unrep ~ dnorm(0, 1/pow(1,2))T(0,)
+  tau_unrep   <- 1/pow(sigma_unrep, 2)
+  
 #---------------------------------------------------
 # Ecological Process model
 #---------------------------------------------------
 for (j in 1:arenas) {
       N[j,1] ~ dpois(N_start[j]) 
-      
-    r[j] ~ dnorm(r_mean, tau_r) 
-  
-    logit(p_unrep[j]) <- beta5*noncompliance[j] + beta7*poaching[j]   #inform p.unreported with compliance + poaching
+      r[j] ~ dnorm(r_mean, tau_r) 
+      alpha_unrep[j] ~ dnorm(mu_unrep, tau_unrep)  # arena-level baseline iuu
+      logit(p_unrep[j]) <- alpha_unrep[j] + beta5*noncompliance[j] + beta7*poaching[j] #inform p.unreported with compliance + poaching
+    
     for (t in 2:(years)){
       
-      U[j,t] ~ dbin(p_unrep[j], N[j,t-1]) 
+      U[j,t] ~ dbin(p_unrep[j], N[j,t-1]-E[j,t]) 
       #binomial(probability of unreported fishing, number of fish not already reported as catch)
 
-      Ftot[j,t] <- E[j,t] + # reported catch
-                U[j,t] # rule breaking and poaching 
+      Ftot[j,t] <- E[j,t] + U[j,t] # legal + rule breaking and poaching 
       
       N_post_harvest[j,t] <- N[j,t-1] - Ftot[j,t]
       
@@ -340,6 +356,7 @@ inits <- function() {
   list(
     N = N_sim,
     M = M_sim,
+    U = U_sim,
     r_mean = rnorm(1, 0.05, 0.02),
     sigma_r = runif(1, 0.1, 0.3),
     r = rnorm(arenas, 0.05,0.02),
@@ -347,13 +364,16 @@ inits <- function() {
     beta3 = rnorm(1, 0, 0.1),
     beta5 = abs(rnorm(1, 0, 0.1)),
     beta6 = runif(1, 0.15, 0.25),
-    beta7 = abs(rnorm(1, 0, 0.1))
+    beta7 = abs(rnorm(1, 0, 0.1)),
+    mu_unrep    = rnorm(1, 0, 0.2),
+    sigma_unrep = runif(1, 0.1, 0.3),
+    alpha_unrep = rnorm(arenas, 0, 0.2)
   )
 }
 
 # Parameters to monitor
 parameters <- c("lambda", "N", "M", "r", "U", "beta6", 
-                "beta1", "beta3", "beta5", "beta7")
+                "beta1", "beta3", "beta5", "beta7", "p_unrep")
 
 out <- jags(data = data.bundle,
             inits = inits,
@@ -369,7 +389,7 @@ out <- jags(data = data.bundle,
 traceplot(out, parameters = parameters)
 ```
 Diagnostics
-```{r, echo=FALSE}
+```{r diagnostics, echo=FALSE}
 #install.packages("jagshelper")
 library(jagshelper)
 
@@ -409,7 +429,7 @@ if ("sd" %in% names(out)) {
 
 ```
 Plots
-```{r}
+```{r plots}
 library(bayesplot)
 library(ggplot2)
 library(tidyverse)
@@ -508,4 +528,230 @@ ggplot(lambda_df, aes(x = actual_year, y = median,
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r simplified model}
+# Temporarily fix p_unrep to a constant to isolate whether
+# the unreported fishing block is causing the geometry problem
+modfile_simple <- tempfile()
+writeLines("
+model {
+  r_mean  ~ dnorm(0.05, 1/pow(1.5,2))
+  sigma_r ~ dnorm(0, 1/pow(1.5,2))T(0,)
+  tau_r   <- 1/pow(sigma_r, 2)
+  beta1   ~ dnorm(0, 1/pow(1.5,2))
+  beta3   ~ dnorm(0, 1/pow(1.5,2))
+  beta6   ~ dnorm(0.5, 1/pow(2,2))T(0,)
+  p_obs   ~ dbeta(14, 6)
+
+  for (j in 1:arenas) {
+    r[j]   ~ dnorm(r_mean, tau_r)
+    N[j,1] ~ dpois(N_start[j])
+
+    for (t in 2:years) {
+      N_post_harvest[j,t] <- N[j,t-1] - E[j,t]   # no U, just observed harvest
+      growth_rate[j,t]    <- r[j] + beta1*Minw[station_id[j],t] + beta3*Ff[j,t]
+      N_expected[j,t]     <- N_post_harvest[j,t] * exp(growth_rate[j,t])
+      N[j,t]              ~ dpois(N_expected[j,t])
+    }
+  }
+
+  for (j in 1:arenas) {
+    for (t in 1:years) {
+      w[j,t] <- ilogit(-beta6 * p_area[j,t])
+      M[j,t] ~ dbin(w[j,t], N[j,t])
+      C[j,t] ~ dbin(p_obs, M[j,t])
+    }
+  }
+
+  for (j in 1:arenas) {
+    for (t in 2:years) {
+      lambda[j,t] <- N[j,t] / N[j,t-1]
+    }
+  }
+}
+", con = modfile_simple)
+
+out_simple <- jags(data = data.bundle,
+                   inits = inits,
+                   parameters.to.save = c("beta1", "beta3", "beta6", "r", "lambda"),
+                   model.file = modfile_simple,
+                   n.chains = 3,
+                   n.adapt  = 50000,
+                   n.iter   = 300000,
+                   n.burnin = 150000,
+                   n.thin   = 100,
+                   parallel = TRUE)
+
+# Check convergence of simplified model
+key <- c("beta1", "beta3", "beta6")
+for(p in key) {
+  cat("\n", p, ":\n", sep="")
+  print(round(out_simple$summary[p, c("mean","sd","Rhat","n.eff")], 4))
+}
+```
+Nimble?
+```{r Nimble}
+library(nimble)
+
+nimble_code <- nimbleCode({
+  r_mean      ~ dnorm(0.05, sd = 1.5)
+  sigma_r     ~ dnorm(0, sd = 1.5)        
+  tau_r       <- 1/pow(sigma_r, 2)
+  
+  beta1       ~ dnorm(0, sd = 1.5)
+  beta3       ~ dnorm(0, sd = 1.5)
+  beta5       ~ dnorm(0.5, sd = 1.5)     
+  beta7       ~ dnorm(0.5, sd = 1.5)      
+  beta6       ~ dnorm(0.5, sd = 2)  
+  
+  mu_unrep    ~ dnorm(0, sd = 1.5)
+  sigma_unrep ~ dnorm(0, sd = 1)          
+  tau_unrep   <- 1/pow(sigma_unrep, 2)
+  
+# Ecological Process model
+for (j in 1:arenas) {
+      N[j,1] ~ dpois(N_start[j]) 
+      r[j] ~ dnorm(r_mean, sigma_r) 
+      alpha_unrep[j] ~ dnorm(mu_unrep, sigma_unrep)  # arena-level baseline iuu
+      logit(p_unrep[j]) <- alpha_unrep[j] + beta5*noncompliance[j] + beta7*poaching[j] #inform p.unreported with compliance + poaching
+    
+    for (t in 2:(years)){
+      
+      U[j,t] ~ dbin(p_unrep[j], N[j,t-1]-E[j,t]) 
+      #binomial(probability of unreported fishing, number of fish not already reported as catch)
+
+      Ftot[j,t] <- E[j,t] + U[j,t] # legal + rule breaking and poaching 
+      
+      N_post_harvest[j,t] <- N[j,t-1] - Ftot[j,t]
+      
+      # Growth to next year
+     growth_rate[j,t] <- r[j] + 
+     (beta1 * Minw[station_id[j],t]) + 
+     (beta3 * Ff[j,t]) 
+      
+      N_expected[j,t] <- N_post_harvest[j,t] * exp(growth_rate[j,t])
+      N[j,t] ~ dpois(N_expected[j,t])
+    }
+}
+
+  # Proportion of the population actually sampled
+ for (j in 1:arenas){
+    for (t in 1:years){
+      w[j,t] <- ilogit(-beta6 * p_area[j,t]) 
+      M[j,t] ~ dbin(w[j,t], N[j,t])
+    }
+  }
+
+  # Observation model for C (counts) - regular binomial 
+
+    p_obs ~ dbeta(14,6)
+
+for (j in 1:arenas) {
+    for (t in 1:years){
+      
+      C[j,t] ~ dbin(p_obs , M[j,t])
+    }
+  }
+  
+
+  # Derived quantities
+  for (j in 1:arenas) {
+    for (t in 1:(years-1)) {
+    lambda[j,t+1] <- N[j,t+1]/N[j,t]
+    }
+  }
+})
+
+nimble_model <- nimbleModel(
+  code    = nimble_code,
+  data    = list(C = C, E = E, p_area = P, Minw = Wl_min_scaled,
+                 Ff = ff_scaled, noncompliance = noncompliance_scale,
+                 poaching = poach_scale),
+  constants = list(arenas = arenas, years = years,
+                   station_id = station_id, N_start = N_start_realistic),
+  inits   = list(
+    N           = N_sim,
+    M           = M_sim,
+    U           = U_sim,
+    r_mean      = 0.05,
+    sigma_r     = 0.2,
+    r           = rep(0.05, arenas),
+    beta1       = 0,
+    beta3       = 0,
+    beta5       = 0.5,
+    beta6       = 0.2,
+    beta7       = 0.5,
+    mu_unrep    = 0,
+    sigma_unrep = 0.3,
+    alpha_unrep = rep(0, arenas),
+    p_obs       = 0.7
+  )
+)
+# Configure joint sampler on N and U together
+conf <- configureMCMC(nimble_model)
+conf$removeSamplers(c("N", "U"))
+
+for(j in 1:arenas) {
+  conf$addSampler(target = paste0("N[", j, ", 1]"), type = "slice")
+  for(t in 2:years) {
+    # Sample U and N jointly at each time step
+    conf$addSampler(target = c(paste0("U[", j, ",", t, "]"),
+                               paste0("N[", j, ",", t, "]")),
+                    type = "AF_slice")  # AF_slice handles mixed discrete/continuous
+  }
+}
+
+
+mcmc <- buildMCMC(conf)
+compiled_model <- compileNimble(nimble_model)
+compiled_mcmc  <- compileNimble(mcmc, project = nimble_model)
+
+samples <- runMCMC(compiled_mcmc,
+                   niter   = 200000,
+                   nburnin = 100000,
+                   thin    = 75,
+                   nchains = 3)
+library(coda)
+samples_coda <- as.mcmc.list(lapply(samples, as.mcmc))
+```
+nimble outputs
+```{r}
+library(coda)
+library(bayesplot)
+
+posterior_matrix <- as.matrix(samples_coda)
+
+key_params <- c("beta1", "beta3", "beta5", "beta6", "beta7",
+                "mu_unrep", "sigma_unrep")
+
+# Rhat and n.eff
+gelman <- gelman.diag(samples_coda, multivariate = FALSE)
+eff    <- effectiveSize(samples_coda)
+
+cat("=== Convergence diagnostics ===\n")
+for(p in key_params) {
+  idx <- grep(paste0("^", p, "$"), rownames(gelman$psrf))
+  if(length(idx) > 0) {
+    cat(sprintf("%-15s Rhat: %.4f   n.eff: %.0f\n",
+                p, gelman$psrf[idx, 1], eff[idx]))
+  }
+}
+
+# Traceplots
+mcmc_trace(posterior_matrix, pars = key_params)
+
+# Posterior intervals
+mcmc_intervals(posterior_matrix, pars = c("beta1", "beta3")) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Posterior estimates for growth covariates")
+
+# Density plots
+mcmc_areas(posterior_matrix, pars = key_params, prob = 0.95) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red")
+
+# Posterior summary table
+cat("\n=== Posterior summary ===\n")
+sum_stats <- summary(samples_coda)
+print(round(sum_stats$statistics[key_params, ], 4))
+print(round(sum_stats$quantiles[key_params, ], 4))
 ```
