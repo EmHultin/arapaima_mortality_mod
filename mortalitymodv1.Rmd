@@ -7,7 +7,27 @@ date: "2026-03-19"
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+# Import posteriors from ecological model
+```{r}
+library(dplyr)
 
+site.order <- c("JA", "CO", "BC" ,"CS" ,"CR" ,"MU", "VE" ,"PV" ,"MI", "JC", "CA" ,"SJ", "CV", "SE", "JG" ,"NP" ,"PP" ,"SS" ,"JF")
+
+r_prior_df_eco <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/r_arena_priors.rds")
+r_hyperpriors  <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/r_hyperpriors.rds")
+beta_priors    <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/beta_priors.rds")
+
+# Build full 19-arena frame
+r_prior_df <- data.frame(arena = site.order) %>%
+  left_join(r_prior_df_eco, by = "arena") %>%
+  mutate(
+    r_mean = ifelse(is.na(r_mean), r_hyperpriors$r_mean_est, r_mean),
+    r_sd   = ifelse(is.na(r_sd),   1.5, r_sd * 2)
+  )
+
+r_prior    <- r_prior_df$r_mean
+r_prior_sd <- r_prior_df$r_sd
+```
 # Rule compliance
 using perceptions data from Cae 
 ``` {r compliance}
@@ -589,7 +609,7 @@ for(p in key) {
   print(round(out_simple$summary[p, c("mean","sd","Rhat","n.eff")], 4))
 }
 ```
-Nimble?
+Nimble version
 ```{r Nimble}
 library(nimble)
 
@@ -598,8 +618,8 @@ nimble_code <- nimbleCode({
   sigma_r     ~ dnorm(0, sd = 1.5)        
   tau_r       <- 1/pow(sigma_r, 2)
   
-  beta1       ~ dnorm(0, sd = 1.5)
-  beta3       ~ dnorm(0, sd = 1.5)
+  beta1       ~ dnorm(beta1_prior, sd = beta1_prior_sd)
+  beta3       ~ dnorm(beta3_prior, sd = beta3_prior_sd)
   beta5       ~ dnorm(0.5, sd = 1.5)     
   beta7       ~ dnorm(0.5, sd = 1.5)      
   beta6       ~ dnorm(0.5, sd = 2)  
@@ -667,8 +687,22 @@ nimble_model <- nimbleModel(
   data    = list(C = C, E = E, p_area = P, Minw = Wl_min_scaled,
                  Ff = ff_scaled, noncompliance = noncompliance_scale,
                  poaching = poach_scale),
-  constants = list(arenas = arenas, years = years,
-                   station_id = station_id, N_start = N_start_realistic),
+  constants = list(
+  arenas          = arenas,
+  years           = years,
+  station_id      = station_id,
+  N_start         = N_start_realistic,
+  r_prior         = r_prior,
+  r_prior_sd      = r_prior_sd,
+  r_mean_prior    = r_hyperpriors$r_mean_est,
+  r_mean_prior_sd = r_hyperpriors$r_mean_sd * 2,
+  sigma_r_prior   = r_hyperpriors$sigma_r_est,
+  sigma_r_prior_sd = r_hyperpriors$sigma_r_sd * 2,
+  beta1_prior     = beta_priors$beta1_mean,
+  beta1_prior_sd  = beta_priors$beta1_sd * 2,
+  beta3_prior     = beta_priors$beta3_mean,
+  beta3_prior_sd  = beta_priors$beta3_sd * 2
+),
   inits   = list(
     N           = N_sim,
     M           = M_sim,
@@ -718,6 +752,7 @@ nimble outputs
 ```{r}
 library(coda)
 library(bayesplot)
+library(ggplot2)
 
 posterior_matrix <- as.matrix(samples_coda)
 
@@ -750,7 +785,6 @@ mcmc_areas(posterior_matrix, pars = key_params, prob = 0.95) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "red")
 
 # Posterior summary table
-cat("\n=== Posterior summary ===\n")
 sum_stats <- summary(samples_coda)
 print(round(sum_stats$statistics[key_params, ], 4))
 print(round(sum_stats$quantiles[key_params, ], 4))
