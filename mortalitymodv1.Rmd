@@ -32,6 +32,15 @@ r_prior_df <- data.frame(arena = site.order) %>%
 
 r_prior    <- r_prior_df$r_mean
 r_prior_sd <- r_prior_df$r_sd
+
+r_obs    <- ifelse(prior_check$informed, 
+                   r_prior,                    # Ch1 posterior mean
+                   r_hyperpriors$r_mean_est)   # fallback to hyperprior mean
+
+r_obs_sd <- ifelse(prior_check$informed,
+                   r_prior_sd / 2,             # tighter than prior for informed
+                   10)                         # effectively no constraint
+
 ```
 # Rule compliance
 using perceptions data from Cae 
@@ -93,6 +102,7 @@ c5 <- tidyr::pivot_wider(c4, names_from = "year", values_from = "report_catchtot
 site.order <- unique(c5$SES[1:19])
 C <- last5[match(site.order, last5$SES), ]
 C <- round(last5[,2:6]) # 2018:2022
+C <- as.matrix(C)
 
 E <- c5[1:19, c(1,21:25)]
 E[is.na(E)] <- 0
@@ -201,18 +211,18 @@ data.bundle <- list(
   years       = years,
   station_id  = station_id,
   N_start     = N_start_realistic,
-  r_prior     = r_prior,
-  r_prior_sd  = r_prior_sd,
-  r_mean_prior    = r_hyperpriors$r_mean_est,
-  r_mean_prior_sd = r_hyperpriors$r_mean_sd * 2,
-  sigma_r_prior   = r_hyperpriors$sigma_r_est,
+  r_mean_prior     = r_hyperpriors$r_mean_est,
+  r_mean_prior_sd  = r_hyperpriors$r_mean_sd * 2,
+  sigma_r_prior    = r_hyperpriors$sigma_r_est,
   sigma_r_prior_sd = r_hyperpriors$sigma_r_sd * 2,
-  beta1_prior     = beta_priors$beta1_mean,
-  beta1_prior_sd  = beta_priors$beta1_sd * 2,
-  beta3_prior     = beta_priors$beta3_mean,
-  beta3_prior_sd  = beta_priors$beta3_sd * 2,
-  beta6_prior = beta_priors$beta6_mean,
-  beta6_prior_sd = beta_priors$beta6_sd * 2
+  beta1_prior      = beta_priors$beta1_mean,
+  beta1_prior_sd   = beta_priors$beta1_sd * 2,
+  beta3_prior      = beta_priors$beta3_mean,
+  beta3_prior_sd   = beta_priors$beta3_sd * 2,
+  beta6_prior      = beta_priors$beta6_mean,
+  beta6_prior_sd   = beta_priors$beta6_sd * 2,
+  r_obs            = r_obs,     
+  r_obs_sd         = r_obs_sd   
 )
 
 # Simulate reasonable parameter values
@@ -313,11 +323,11 @@ model {
   r_mean  ~ dnorm(r_mean_prior, 1/pow(r_mean_prior_sd, 2))
   sigma_r ~ dnorm(sigma_r_prior, 1/pow(sigma_r_prior_sd, 2))T(0,)
   tau_r   <- 1/pow(sigma_r, 2)
-  
-  beta1   ~ dnorm(beta1_prior, 1/pow(beta1_prior_sd, 2))
-  beta3   ~ dnorm(beta3_prior, 1/pow(beta3_prior_sd, 2))
-  beta6   ~ dnorm(beta6_prior, 1/pow(beta6_prior_sd, 2))T(0,)
-   
+
+  beta1 ~ dnorm(beta1_prior, 1/pow(beta1_prior_sd, 2))
+  beta3 ~ dnorm(beta3_prior, 1/pow(beta3_prior_sd, 2))
+  beta6 ~ dnorm(beta6_prior, 1/pow(beta6_prior_sd, 2))T(0,)
+
   mu_unrep    ~ dnorm(0, 1/pow(1.5, 2))
   sigma_unrep ~ dnorm(0, 1/pow(1, 2))T(0,)
   tau_unrep   <- 1/pow(sigma_unrep, 2)
@@ -327,7 +337,9 @@ model {
 #---------------------------------------------------
 for (j in 1:arenas) {
       N[j,1] ~ dpois(N_start[j]) 
-      r[j] ~ dnorm(r_prior[j], 1/pow(r_prior_sd[j], 2)) 
+      r[j] ~ dnorm(r_mean, tau_r)
+      r_obs[j] ~ dnorm(r[j], 1/pow(r_obs_sd[j], 2)) #arena specific informing 
+      
       alpha_unrep[j] ~ dnorm(mu_unrep, tau_unrep)  # arena-level baseline iuu
       logit(p_unrep[j]) <- alpha_unrep[j] 
     
@@ -386,17 +398,15 @@ for (j in 1:arenas) {
 inits <- function() {
   
   list(
-    N = N_sim,
-    M = M_sim,
-    U = U_sim,
-    r_mean = rnorm(1, r_hyperpriors$r_mean_est, 0.02),
-    sigma_r = runif(1, 0.1, 0.3),
-    r =  r_prior,
-    beta1 = rnorm(1, beta_priors$beta1_mean, 0.05),
-    beta3 = rnorm(1, beta_priors$beta3_mean, 0.05),
-    #beta5 = abs(rnorm(1, 0, 0.1)),
-    beta6 = runif(1, 0.15, 0.25),
-    #beta7 = abs(rnorm(1, 0, 0.1)),
+    N           = N_sim,
+    M           = M_sim,
+    U           = U_sim,
+    r_mean      = rnorm(1, r_hyperpriors$r_mean_est, 0.02),
+    sigma_r     = runif(1, 0.1, 0.3),
+    r           = rnorm(arenas, r_hyperpriors$r_mean_est, 0.02),
+    beta1       = rnorm(1, beta_priors$beta1_mean, 0.05),
+    beta3       = rnorm(1, beta_priors$beta3_mean, 0.05),
+    beta6       = runif(1, 0.15, 0.25),
     mu_unrep    = rnorm(1, logit_start, 0.2),
     sigma_unrep = runif(1, 0.1, 0.3),
     alpha_unrep = rep(logit_start, arenas)
@@ -459,6 +469,45 @@ if ("sd" %in% names(out)) {
   }
 }
 
+# Build clean p_unrep summary
+p_unrep_means <- out$mean$p_unrep
+p_unrep_sds   <- out$sd$p_unrep
+
+p_unrep_final <- data.frame(
+  arena        = site.order,
+  informed     = prior_check$informed,
+  p_unrep_mean = round(p_unrep_means, 4),
+  p_unrep_sd   = round(p_unrep_sds, 4),
+  p_unrep_2.5  = round(out$q2.5$p_unrep, 4),
+  p_unrep_97.5 = round(out$q97.5$p_unrep, 4)
+) %>% arrange(desc(p_unrep_mean))
+
+p_unrep_final
+
+
+# Check convergence across all N nodes
+n_rhats <- out$summary[grep("^N\\[", rownames(out$summary)), "Rhat"]
+cat("\nN node convergence:\n")
+cat("Max Rhat:   ", round(max(n_rhats), 4), "\n")
+cat("Mean Rhat:  ", round(mean(n_rhats), 4), "\n")
+cat("N Rhat > 1.1:", sum(n_rhats > 1.1), "\n")
+
+# Save outputs for Chapter 3
+p_unrep_ch3 <- p_unrep_final
+lambda_cols  <- grep("^lambda", rownames(out$summary), value = TRUE)
+lambda_ch3   <- data.frame(
+  param        = lambda_cols,
+  arena        = site.order[as.integer(sub("lambda\\[(\\d+),.*", "\\1", lambda_cols))],
+  year         = as.integer(sub("lambda\\[\\d+,(\\d+)\\]", "\\1", lambda_cols)),
+  lambda_mean  = round(out$summary[lambda_cols, "mean"], 4),
+  lambda_sd    = round(out$summary[lambda_cols, "sd"], 4),
+  lambda_2.5   = round(out$summary[lambda_cols, "2.5%"], 4),
+  lambda_97.5  = round(out$summary[lambda_cols, "97.5%"], 4)
+)
+
+saveRDS(p_unrep_ch3, "priors/p_unrep_ch3.rds") #verify they save on desktop
+saveRDS(lambda_ch3,  "priors/lambda_ch3.rds")
+
 ```
 Plots
 ```{r plots}
@@ -480,13 +529,6 @@ mcmc_intervals(posterior, pars = beta_params)+
   geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
   labs(title = "Posterior estimates for covariate effects",
        subtitle = "50% and 95% credible intervals")
-# Density plots
-mcmc_areas(posterior, pars = beta_params,
-           prob = 0.95) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
-  labs(title = "Posterior density distributions",
-       subtitle = "Shaded area = 95% credible interval")
-
 
 #lambda trends
 lambda_cols <- grep("lambda", colnames(posterior), value = TRUE)
@@ -531,35 +573,85 @@ arena_lookup <- c(
   "19" = "JF"
 )
 
-# Define year mapping - 17 years from 2006 to 2022
-year_lookup <- setNames(2006:2022, 1:17)
 
-lambda_df <- lambda_df %>%
+year_lookup <- setNames(2018:2022, 1:years)
+
+lambda_df <- as.data.frame(posterior) %>%
+  select(starts_with("lambda")) %>%
+  summarise(across(everything(), list(
+    median = ~median(.),
+    lower  = ~quantile(., 0.025),
+    upper  = ~quantile(., 0.975)
+  ))) %>%
+  pivot_longer(everything(),
+               names_to  = c("param", ".value"),
+               names_pattern = "(.+)_(median|lower|upper)") %>%
   mutate(
-    actual_year  = year_lookup[as.character(year)],
-    arena_code   = arena_lookup[as.character(arena)]
-  )
+    arena_idx = as.integer(str_extract(param, "(?<=\\[)\\d+")),
+    year_idx  = as.integer(str_extract(param, "(?<=,)\\d+(?=\\])")),
+    arena     = arena_lookup[as.character(arena_idx)],
+    year      = year_lookup[as.character(year_idx)]
+  ) %>%
+  filter(!is.na(arena) & !is.na(year))
 
-ggplot(lambda_df, aes(x = actual_year, y = median, 
-                      group = arena_code, color = arena_code)) +
+ggplot(lambda_df, aes(x = year, y = median,
+                      group = arena, color = arena)) +
   geom_line() +
-  geom_ribbon(aes(ymin = lower, ymax = upper, fill = arena_code), 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = arena),
               alpha = 0.15, color = NA) +
   geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
   scale_color_viridis_d() +
   scale_fill_viridis_d() +
-  scale_x_continuous(breaks = 2006:2022) +
-  labs(
-    title = "Annual population growth rate (lambda) by SES arena",
-    x     = "Year",
-    y     = "Lambda",
-    color = "Arena",
-    fill  = "Arena"
-  ) +
+  scale_x_continuous(breaks = 2019:2022) +
+  labs(title = "Annual population growth rate (lambda) by SES arena",
+       x     = "Year",
+       y     = "Lambda",
+       color = "Arena",
+       fill  = "Arena") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+ratio_df <- data.frame(
+  arena      = site.order,
+  mean_ratio = sapply(1:arenas, function(j) {
+    ratios <- E[j, 2:years] / pmax(C[j, 1:(years-1)], 1)
+    ratios[is.infinite(ratios)] <- NA
+    mean(ratios, na.rm = TRUE)
+  })
+)
+
+validation_df <- p_unrep_final %>%
+  left_join(ratio_df, by = "arena")
+
+cat("\nValidation df columns:", names(validation_df), "\n")
+cat("\nSpearman correlation p_unrep vs harvest/count ratio:\n")
+cat(round(cor(validation_df$p_unrep_mean,
+              validation_df$mean_ratio,
+              method = "spearman",
+              use    = "complete.obs"), 3), "\n")
+
+
+# informed vs uninformed p_unrep estimates
+ggplot(validation_df, aes(x     = mean_ratio,
+                           y     = p_unrep_mean,
+                           color = informed,
+                           label = arena)) +
+  geom_point(aes(size = 1/p_unrep_sd)) +
+  geom_errorbar(aes(ymin = p_unrep_2.5, ymax = p_unrep_97.5),
+                width = 0.02, alpha = 0.5) +
+  geom_text_repel(size = 3) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
+                     labels = c("FALSE" = "Uninformed", "TRUE" = "Informed")) +
+  labs(x     = "Mean harvest / prior year count",
+       y     = "Estimated p_unrep",
+       color = "Prior type",
+       size  = "Certainty",
+       title = "Model validation: p_unrep vs independent harvest pressure index") +
+  theme_minimal()
 ```
-Nimble version
+#### Nimble versions 
 ```{r Nimble}
 library(nimble)
 
