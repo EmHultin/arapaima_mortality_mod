@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 # Import posteriors from ecological model
 ```{r}
 library(dplyr)
-
+site.order.m1 <-c("JA", "CO" ,"BC" ,"CR", "CS", "JF" ,"MU", "NP", "PP", "PV", "SS" ,"VE")
 site.order <- c("JA", "CO", "BC" ,"CS" ,"CR" ,"MU", "VE" ,"PV" ,"MI", "JC", "CA" ,"SJ", "CV", "SE", "JG" ,"NP" ,"PP" ,"SS" ,"JF")
 #laptop
 #r_prior_df_eco <- readRDS("~/Library/CloudStorage/OneDrive-VirginiaTech/Github/arapaima_phenom_mod/priors/r_arena_priors.rds")
@@ -21,25 +21,24 @@ site.order <- c("JA", "CO", "BC" ,"CS" ,"CR" ,"MU", "VE" ,"PV" ,"MI", "JC", "CA"
 r_prior_df_eco <- readRDS("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/priors/r_arena_priors.rds")
 r_hyperpriors  <- readRDS("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/priors/r_hyperpriors.rds")
 beta_priors    <- readRDS("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/priors/beta_priors.rds")
-
 # Build full 19-arena frame
 r_prior_df <- data.frame(arena = site.order) %>%
-  left_join(r_prior_df_eco, by = "arena") %>%
-  mutate(
-    r_mean = ifelse(is.na(r_mean), r_hyperpriors$r_mean_est, r_mean),
-    r_sd   = ifelse(is.na(r_sd),   1.5, r_sd * 2)
-  )
+left_join(r_prior_df_eco, by = "arena") %>%
+mutate(
+r_mean = ifelse(is.na(r_mean), r_hyperpriors$r_mean_est, r_mean),
+r_sd   = ifelse(is.na(r_sd),   1.5, r_sd * 2)
+)
+r_prior_m2 <- data.frame(
+  site   = site.order,
+  r_mean = r_prior_df$r_mean[match(site.order, r_prior_df$arena)],
+  r_sd   = r_prior_df$r_sd[match(site.order, r_prior_df$arena)]
+)
 
-r_prior    <- r_prior_df$r_mean
-r_prior_sd <- r_prior_df$r_sd
+# replace uninformative SDs (from arenas not in model 1) with hyperprior SD
+uninformative <- r_prior_m2$r_sd > 0.2
+r_prior_m2$r_mean[uninformative] <- r_hyperpriors$r_mean_est
+r_prior_m2$r_sd[uninformative]   <- r_hyperpriors$r_mean_sd * 2
 
-r_obs    <- ifelse(prior_check$informed, 
-                   r_prior,                    # Ch1 posterior mean
-                   r_hyperpriors$r_mean_est)   # fallback to hyperprior mean
-
-r_obs_sd <- ifelse(prior_check$informed,
-                   r_prior_sd / 2,             # tighter than prior for informed
-                   10)                         # effectively no constraint
 
 ```
 # Rule compliance
@@ -69,13 +68,28 @@ library(dplyr)
 poach_raw <- read.csv("poaching_emma_lake.csv")
 # combine poaching days for each lake from high and low water season
 # take average of the top 5 lakes to create poaching index
-lake_sum <- poach_raw %>% group_by(lago, SES) %>% summarise(total_poach = sum(days_poached))
-
-result <- lake_sum %>%
+poach_index <- poach_raw %>%
+  group_by(SES, lago) %>%
+  summarise(lake_total = sum(days_poached, na.rm = TRUE), .groups = "drop") %>%
   group_by(SES) %>%
-  slice_max(order_by = total_poach, n = 5) %>%
-  summarise(avg_top5_poach = mean(total_poach))
-poach_scale <- as.vector(scale(result$avg_top5_poach)) 
+  slice_max(order_by = lake_total, n = 5) %>%
+  summarise(top5_poach = sum(lake_total), .groups = "drop") %>%
+  mutate(SES = factor(SES, levels = site.order)) %>%
+  arrange(SES) %>%
+  mutate(poach_scaled = scale(top5_poach)[,1])
+```
+# Indirect questioning
+```{r indirect}
+iq_estimates <- readRDS("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/priors/indirect_estimates.rds")
+#combining size and season as an index (lake was not correlated)
+iq_index <- iq_estimates %>%
+  filter(rule %in% c("compmgts", "compmgtsea")) %>%
+  group_by(idses) %>%
+  summarise(incompliance_harvest = mean(mean, na.rm = TRUE), .groups = "drop") %>%
+  left_join(ses_code, by = c("idses" = "SES")) %>%
+  mutate(SES.name = factor(SES.name, levels = site.order)) %>%
+  arrange(SES.name) %>%
+  mutate(incompliance_scaled = scale(incompliance_harvest)[,1])
 ```
 # Ecological variables
 ```{r catch/count}
@@ -101,21 +115,23 @@ c5 <- tidyr::pivot_wider(c4, names_from = "year", values_from = "report_catchtot
 
 site.order <- unique(c5$SES[1:19])
 C <- last5[match(site.order, last5$SES), ]
-C <- round(last5[,2:6]) # 2018:2022
-C <- as.matrix(C)
+C <- as.matrix(round(C[,2:6])) # 2018:2022
+rownames(C) <- site.order
 
-E <- c5[1:19, c(1,21:25)]
+E <- c5[match(site.order, c5$SES), c(1, 21:25)]
 E[is.na(E)] <- 0
-E <- as.matrix(E[,-1])
+E <- as.matrix(E[, -1])
 storage.mode(E) <- "numeric"
 
 #proportion of total lake area surveyed each year
 prop_surveyed <- read.csv("propSES_surveyed_byyear_FIXED.csv")
 prop_surveyed <- prop_surveyed[match(site.order, prop_surveyed$SES),] 
-P <- prop_surveyed[,c(1,21:25)] 
+rownames(prop_surveyed) <- site.order
+P <- prop_surveyed[, c("SES", "X2018", "X2019", "X2020", "X2021", "X2022")]
 P[is.na(P)] <- 0
-P <- as.matrix(P[,-1])
+P <- as.matrix(P[, -1])
 storage.mode(P) <- "numeric"
+
 ```
 ```{r min water level}
 library(dplyr)
@@ -188,141 +204,99 @@ Wl_flood[, year_cols] <- Wl_max_plus[, year_cols] *
                           (Wl_max_plus$`Percent area flooded forest` / 100)
 
 ff_matrix <- as.matrix(Wl_flood[, year_cols])
-rownames(ff_matrix) <- Wl_flood$SES
-ff_scaled <- t(scale(t(ff_matrix)))
+rownames(ff_matrix) <- site.order
+
+# global scaling to preserve between-arena variation
+ff_mean   <- mean(ff_matrix, na.rm = TRUE)
+ff_sd     <- sd(as.vector(ff_matrix), na.rm = TRUE)
+ff_scaled <- (ff_matrix - ff_mean) / ff_sd
+rownames(ff_scaled) <- site.order
+
 
 ```
 # Model
 ```{r data bundle/initial sim}
-N_start_realistic <- numeric(arenas)
+# Detection parameters for initialization
+p_obs_fixed  <- 0.85
+beta6_target <- 0.485
+p_unrep_start <- 0.17
+logit_start   <- log(p_unrep_start / (1 - p_unrep_start))
 
-for(j in 1:arenas) {
-  obs_counts <- C[j, ]
-  max_count <- max(obs_counts, na.rm=TRUE)
-  N_start_realistic[j] <- max_count * 4
-} 
-data.bundle <- list(
-  C           = C,
-  E           = E,
-  p_area      = P,
-  Minw        = Wl_min_scaled,
-  Ff          = ff_scaled,
-  arenas      = arenas,
-  years       = years,
-  station_id  = station_id,
-  N_start     = N_start_realistic,
-  r_mean_prior     = r_hyperpriors$r_mean_est,
-  r_mean_prior_sd  = r_hyperpriors$r_mean_sd * 2,
-  sigma_r_prior    = r_hyperpriors$sigma_r_est,
-  sigma_r_prior_sd = r_hyperpriors$sigma_r_sd * 2,
+# Back-calculate N_implied for N_start
+N_implied <- matrix(NA, nrow=arenas, ncol=years)
+for(j in 1:arenas){
+  for(t in 1:years){
+    w_implied      <- plogis(-beta6_target * P[j,t])
+    N_implied[j,t] <- ceiling(C[j,t] / (w_implied * p_obs_fixed))
+  }
+}
+
+# Initialize N, M, U
+N_sim <- matrix(NA, nrow=arenas, ncol=years)
+M_sim <- matrix(NA, nrow=arenas, ncol=years)
+U_sim <- matrix(NA, nrow=arenas, ncol=years-1)
+
+for(j in 1:arenas){
+  for(t in 1:years){
+    w_sim      <- plogis(-beta6_target * P[j,t])
+    M_sim[j,t] <- max(ceiling(C[j,t] / p_obs_fixed), C[j,t] + 5)
+    N_sim[j,t] <- max(ceiling(M_sim[j,t] / w_sim), M_sim[j,t] + 10)
+    if(E[j,t] > 0){
+      N_sim[j,t] <- max(N_sim[j,t], E[j,t] * 2)
+      M_sim[j,t] <- max(M_sim[j,t], ceiling(E[j,t] * 2 * w_sim))
+    }
+    if(M_sim[j,t] > N_sim[j,t]) N_sim[j,t] <- M_sim[j,t] + 10
+    if(C[j,t]     > M_sim[j,t]){
+      M_sim[j,t] <- C[j,t] + 5
+      N_sim[j,t] <- max(N_sim[j,t], M_sim[j,t] + 10)
+    }
+  }
+  for(t in 1:(years-1)){
+    avail      <- max(N_sim[j,t] - E[j,t], 0)
+    U_sim[j,t] <- min(round(avail * p_unrep_start), avail)
+  }
+}
+
+storage.mode(N_sim) <- "numeric"
+storage.mode(M_sim) <- "numeric"
+storage.mode(U_sim) <- "numeric"
+
+data.bundle_m <- list(
+  C                = C,
+  E                = E,
+  p_area           = P,
+  indirect         = iq_index$incompliance_scaled,
+  poaching         = poach_index$poach_scaled,
+  Minw             = Wl_min_scaled,
+  Ff               = ff_scaled,
+  arenas           = arenas,
+  years            = years,
+  station_id       = station_id,
+  N_start          = apply(N_implied, 1, max),
+  r_prior_mean     = r_prior_m2$r_mean,
+  r_prior_sd       = r_prior_m2$r_sd,
   beta1_prior      = beta_priors$beta1_mean,
   beta1_prior_sd   = beta_priors$beta1_sd * 2,
   beta3_prior      = beta_priors$beta3_mean,
   beta3_prior_sd   = beta_priors$beta3_sd * 2,
   beta6_prior      = beta_priors$beta6_mean,
-  beta6_prior_sd   = beta_priors$beta6_sd * 2,
-  r_obs            = r_obs,     
-  r_obs_sd         = r_obs_sd   
+  beta6_prior_sd   = beta_priors$beta6_sd * 2
 )
-
-# Simulate reasonable parameter values
-p_sim <- 0.7  # Fix detection at 0.7
-beta6_sim <- 0.5  # Fix availability parameter at 0.5
-
-# Initialize matrices
-N_sim <- matrix(NA, nrow = arenas, ncol = years)
-M_sim <- matrix(NA, nrow = arenas, ncol = years)
-
-for (j in 1:arenas) {
-  for (t in 1:years) {
-    
-    # Back-calculate M from C
-    # C ~ Binomial(M, p_detect)
-    # So M ~ C / p_detect
-    if (C[j, t] > 0) {
-      M_sim[j, t] <- max(round(C[j, t] / p_sim), C[j, t] + 5)
-    } else {
-      # When count is 0, assume small population was present but not detected
-      # Use harvest as a clue - if harvest occurred, population must have existed
-      if (E[j, t] > 0) {
-        M_sim[j, t] <- max(round(E[j, t] * 1.5), 20)
-      } else {
-        M_sim[j, t] <- round(runif(1, 10, 50))
-      }
-    }
-    
-    # Back-calculate N from M
-    # M ~ Binomial(N, w) where w = ilogit(-beta6 * p_area)
-    w_sim <- 1 / (1 + exp(beta6_sim * P[j, t]))
-    w_sim <- max(w_sim, 0.1)  # Prevent division by very small numbers
-    
-    N_sim[j, t] <- max(round(M_sim[j, t] / w_sim), M_sim[j, t] + 10)
-    
-    # Step 3: Ensure N can support harvest
-    # Population must be large enough to sustain the harvest
-    if (E[j, t] > 0) {
-      N_min_for_harvest <- E[j, t] * 2  # Population should be at least 2x harvest
-      N_sim[j, t] <- max(N_sim[j, t], N_min_for_harvest)
-      # Also update M to maintain hierarchy
-      M_sim[j, t] <- max(M_sim[j, t], round(N_min_for_harvest * 0.6))
-    }
-  }
-}
-
-# Final validation and corrections
-
-# Ensure all values are positive integers
-N_sim <- round(pmax(N_sim, 10))
-M_sim <- round(pmax(M_sim, 5))
-
-# Enforce hierarchy: N >= M >= C
-for (j in 1:arenas) {
-  for (t in 1:years) {
-    # Ensure M <= N
-    if (M_sim[j, t] > N_sim[j, t]) {
-      N_sim[j, t] <- M_sim[j, t] + 10
-    }
-    
-    # Ensure C <= M
-    if (C[j, t] > M_sim[j, t]) {
-      M_sim[j, t] <- C[j, t] + 5
-      N_sim[j, t] <- max(N_sim[j, t], M_sim[j, t] + 10)
-    }
-  }
-}
-
-U_sim <- matrix(NA, nrow = arenas, ncol = years)
-p_unrep_start <- 0.05
-logit_start   <- log(p_unrep_start / (1 - p_unrep_start))  # -2.944
-
-# Rebuild U_sim consistent with p_unrep_start
-U_sim <- matrix(NA, nrow = arenas, ncol = years)
-for(j in 1:arenas) {
-  for(t in 2:years) {
-    avail      <- max(N_sim[j,t-1] - E[j,t], 0)
-    U_sim[j,t] <- min(round(avail * p_unrep_start), avail)
-  }
-}
-
-# Convert to numeric matrices (required by JAGS)
-storage.mode(N_sim) <- "numeric"
-storage.mode(M_sim) <- "numeric"
-storage.mode(U_sim) <- "numeric"
 ```
 3 tier model
 ```{r JAGS full}
 library(rjags)
 library(jagsUI)
 
-modfile <- tempfile()
+modfile_mort <- tempfile()
 writeLines("
 model {
   #---------------------------------------------------
   # Priors
   #---------------------------------------------------
-  r_mean  ~ dnorm(r_mean_prior, 1/pow(r_mean_prior_sd, 2))
-  sigma_r ~ dnorm(sigma_r_prior, 1/pow(sigma_r_prior_sd, 2))T(0,)
-  tau_r   <- 1/pow(sigma_r, 2)
+ # r_mean  ~ dnorm(r_mean_prior, 1/pow(r_mean_prior_sd, 2))T(-0.5, 0.5)
+ # sigma_r ~ dnorm(sigma_r_prior, 1/pow(sigma_r_prior_sd, 2))T(0,)
+ # tau_r   <- 1/pow(sigma_r, 2)
 
   beta1 ~ dnorm(beta1_prior, 1/pow(beta1_prior_sd, 2))
   beta3 ~ dnorm(beta3_prior, 1/pow(beta3_prior_sd, 2))
@@ -332,33 +306,44 @@ model {
   sigma_unrep ~ dnorm(0, 1/pow(1, 2))T(0,)
   tau_unrep   <- 1/pow(sigma_unrep, 2)
   
+ #priors on alpha and beta of distribution for p_unrep
+ #shp1 ~ dgamma(0.01, 0.01)
+ #shp2 ~ dgamma(0.01, 0.01)
+ phi ~ dgamma(0.01, 0.01)
+ beta8 ~ dnorm(0, 1/pow(1,2))T(0,)
+ beta7 ~ dnorm(0, 1/pow(1,2))T(0,)
+ 
+ 
+ intercept ~ dnorm(-1, 1/pow(1.5, 2))
 #---------------------------------------------------
 # Ecological Process model
 #---------------------------------------------------
 for (j in 1:arenas) {
       N[j,1] ~ dpois(N_start[j]) 
-      r[j] ~ dnorm(r_mean, tau_r)
-      r_obs[j] ~ dnorm(r[j], 1/pow(r_obs_sd[j], 2)) #arena specific informing 
+      r[j] ~ dnorm(r_prior_mean[j], 1/pow(r_prior_sd[j], 2))T(-0.5, 0.5)
+     
+     logit(mu_p_unrep[j]) <- intercept + beta8*indirect[j] + beta7*poaching[j] 
+     shp1[j] <- phi*mu_p_unrep[j]
+     shp2[j] <- phi*(1-mu_p_unrep[j])
+     
+     p_unrep[j] ~ dbeta(shp1[j], shp2[j])
+     
+    for (t in 1:(years-1)){
       
-      alpha_unrep[j] ~ dnorm(mu_unrep, tau_unrep)  # arena-level baseline iuu
-      logit(p_unrep[j]) <- alpha_unrep[j] 
-    
-    for (t in 2:(years)){
-      
-      U[j,t] ~ dbin(p_unrep[j], N[j,t-1]-E[j,t]) 
+      U[j,t] ~ dbin(p_unrep[j], N[j,t]-E[j,t]) #confirm that harvest and count happen in the same year 
       #binomial(probability of unreported fishing, number of fish not already reported as catch)
 
       Ftot[j,t] <- E[j,t] + U[j,t] # legal + rule breaking and poaching 
       
-      N_post_harvest[j,t] <- N[j,t-1] - Ftot[j,t]
+      N_post_harvest[j,t] <- N[j,t] - Ftot[j,t]
       
       # Growth to next year
      growth_rate[j,t] <- r[j] + 
      (beta1 * Minw[station_id[j],t]) + 
      (beta3 * Ff[j,t]) 
       
-      N_expected[j,t] <- N_post_harvest[j,t] * exp(growth_rate[j,t])
-      N[j,t] ~ dpois(N_expected[j,t])
+      N_expected[j,t+1] <- N_post_harvest[j,t] * exp(growth_rate[j,t])
+      N[j,t+1] ~ dpois(N_expected[j,t+1])
     }
 }
   #---------------------------------------------------
@@ -373,7 +358,7 @@ for (j in 1:arenas) {
   #---------------------------------------------------
   # Observation model for C (counts) - regular binomial 
   #---------------------------------------------------
-    p_obs ~ dbeta(14,6)
+    p_obs <- 0.85 #fixing to reduce model complexity 
 
 for (j in 1:arenas) {
     for (t in 1:years){
@@ -392,35 +377,41 @@ for (j in 1:arenas) {
   }
 }
 
-", con = modfile)
+", con = modfile_mort)
 
 # Initialization function
-inits <- function() {
+inits_m <- function() {
+  
+  p_unrep_init <- rbeta(arenas, 2, 10)  # mean ~0.17, constrained away from 1
   
   list(
     N           = N_sim,
     M           = M_sim,
     U           = U_sim,
-    r_mean      = rnorm(1, r_hyperpriors$r_mean_est, 0.02),
-    sigma_r     = runif(1, 0.1, 0.3),
-    r           = rnorm(arenas, r_hyperpriors$r_mean_est, 0.02),
-    beta1       = rnorm(1, beta_priors$beta1_mean, 0.05),
-    beta3       = rnorm(1, beta_priors$beta3_mean, 0.05),
-    beta6       = runif(1, 0.15, 0.25),
-    mu_unrep    = rnorm(1, logit_start, 0.2),
-    sigma_unrep = runif(1, 0.1, 0.3),
-    alpha_unrep = rep(logit_start, arenas)
+   # r_mean      = rnorm(1, r_hyperpriors$r_mean_est, 0.02),
+   # sigma_r     = runif(1, 0.01, 0.05),
+    r           = rnorm(arenas, r_hyperpriors$r_mean_est, 0.01),
+    beta1       = rnorm(1, beta_priors$beta1_mean, 0.001),
+    beta3       = rnorm(1, beta_priors$beta3_mean, 0.001),
+    beta6       = rnorm(1, beta_priors$beta6_mean, 0.01),
+    beta8       = runif(1,0,0.1),
+    beta7       = runif(1,0,0.1),
+    mu_unrep    = rnorm(1, logit_start, 0.1),
+    sigma_unrep = runif(1, 0.05, 0.15),
+    phi         = runif(1, 5, 15),
+    intercept   = rnorm(1, -1, 0.1),
+    p_unrep     = p_unrep_init
   )
 }
 
 # Parameters to monitor
-parameters <- c("beta1", "beta3", "beta6", "mu_unrep", "sigma_unrep",
-                "p_unrep", "lambda", "N", "r")
+parameters_m <- c("beta1", "beta3", "beta6", "beta8", "beta7", "mu_unrep", 
+                "sigma_unrep", "p_unrep", "lambda", "N", "r", "phi", "intercept")
 
-out <- jags(data = data.bundle,
-            inits = inits,
-            parameters.to.save = parameters,
-            model.file = modfile,
+out_m <- jags(data = data.bundle_m,
+            inits = inits_m,
+            parameters.to.save = parameters_m,
+            model.file = modfile_mort,
             n.chains = 3,
             n.adapt = 30000,
             n.iter = 200000,
@@ -428,65 +419,64 @@ out <- jags(data = data.bundle,
             n.thin = 75,
             parallel = TRUE)
 
-traceplot(out, parameters = parameters)
+traceplot(out_m, parameters = parameters_m)
 ```
 Diagnostics
 ```{r diagnostics, echo=FALSE}
 #install.packages("jagshelper")
 library(jagshelper)
 
-key_params <- c("beta1", "beta3", "beta6", "p_unrep", "U")
+key_params <- c("beta1", "beta3", "beta6", "p_unrep")
 
 for (param in key_params) {
-  if (param %in% rownames(out$summary)) {
+  if (param %in% rownames(out_m$summary)) {
     cat("\n", param, ":\n", sep="")
-    param_summary <- out$summary[param, ]
+    param_summary <- out_m$summary[param, ]
     print(round(param_summary, 4))
   } else {
     cat("\n", param, ": NOT FOUND\n", sep="")
   }
 }
 
-check_neff(out, 200)
+check_neff(out_m, 200)
 
-check_Rhat(out)
+check_Rhat(out_m)
 
-if ("mean" %in% names(out)) {
+if ("mean" %in% names(out_m)) {
   cat("\nParameter means:\n")
   for (param in key_params) {
-    if (param %in% names(out$mean)) {
-      cat(sprintf("  %-12s = %8.4f\n", param, out$mean[[param]]))
+    if (param %in% names(out_m$mean)) {
+      cat(sprintf("  %-12s = %8.4f\n", param, out_m$mean[[param]]))
     }
   }
 }
 
-if ("sd" %in% names(out)) {
+if ("sd" %in% names(out_m)) {
   cat("\nParameter SDs:\n")
   for (param in key_params) {
-    if (param %in% names(out$sd)) {
-      cat(sprintf("  %-12s = %8.4f\n", param, out$sd[[param]]))
+    if (param %in% names(out_m$sd)) {
+      cat(sprintf("  %-12s = %8.4f\n", param, out_m$sd[[param]]))
     }
   }
 }
 
 # Build clean p_unrep summary
-p_unrep_means <- out$mean$p_unrep
-p_unrep_sds   <- out$sd$p_unrep
+p_unrep_means <- out_m$mean$p_unrep
+p_unrep_sds   <- out_m$sd$p_unrep
 
 p_unrep_final <- data.frame(
   arena        = site.order,
-  informed     = prior_check$informed,
   p_unrep_mean = round(p_unrep_means, 4),
   p_unrep_sd   = round(p_unrep_sds, 4),
-  p_unrep_2.5  = round(out$q2.5$p_unrep, 4),
-  p_unrep_97.5 = round(out$q97.5$p_unrep, 4)
+  p_unrep_2.5  = round(out_m$q2.5$p_unrep, 4),
+  p_unrep_97.5 = round(out_m$q97.5$p_unrep, 4)
 ) %>% arrange(desc(p_unrep_mean))
 
 p_unrep_final
 
 
 # Check convergence across all N nodes
-n_rhats <- out$summary[grep("^N\\[", rownames(out$summary)), "Rhat"]
+n_rhats <- out_m$summary[grep("^N\\[", rownames(out_m$summary)), "Rhat"]
 cat("\nN node convergence:\n")
 cat("Max Rhat:   ", round(max(n_rhats), 4), "\n")
 cat("Mean Rhat:  ", round(mean(n_rhats), 4), "\n")
@@ -494,123 +484,130 @@ cat("N Rhat > 1.1:", sum(n_rhats > 1.1), "\n")
 
 # Save outputs for Chapter 3
 p_unrep_ch3 <- p_unrep_final
-lambda_cols  <- grep("^lambda", rownames(out$summary), value = TRUE)
+lambda_cols  <- grep("^lambda", rownames(out_m$summary), value = TRUE)
 lambda_ch3   <- data.frame(
   param        = lambda_cols,
   arena        = site.order[as.integer(sub("lambda\\[(\\d+),.*", "\\1", lambda_cols))],
   year         = as.integer(sub("lambda\\[\\d+,(\\d+)\\]", "\\1", lambda_cols)),
-  lambda_mean  = round(out$summary[lambda_cols, "mean"], 4),
-  lambda_sd    = round(out$summary[lambda_cols, "sd"], 4),
-  lambda_2.5   = round(out$summary[lambda_cols, "2.5%"], 4),
-  lambda_97.5  = round(out$summary[lambda_cols, "97.5%"], 4)
+  lambda_mean  = round(out_m$summary[lambda_cols, "mean"], 4),
+  lambda_sd    = round(out_m$summary[lambda_cols, "sd"], 4),
+  lambda_2.5   = round(out_m$summary[lambda_cols, "2.5%"], 4),
+  lambda_97.5  = round(out_m$summary[lambda_cols, "97.5%"], 4)
 )
 
-saveRDS(p_unrep_ch3, "priors/p_unrep_ch3.rds") #verify they save on desktop
-saveRDS(lambda_ch3,  "priors/lambda_ch3.rds")
+#saveRDS(p_unrep_ch3, "priors/p_unrep_ch3.rds") #verify they save on desktop
+#saveRDS(lambda_ch3,  "priors/lambda_ch3.rds")
 
 ```
+```{r }
+saveRDS(out_m, "model2_full_results.rds")
+
+# full convergence summary
+check_neff(out_m, 200)
+check_Rhat(out_m)
+
+# traceplots for key parameters
+traceplot(out_m, parameters = c("beta7", "beta8", "beta6", 
+                                 "intercept", "phi"))
+
+```
+
 Plots
-```{r plots}
+```{r posterior & lambda plots}
 library(bayesplot)
 library(ggplot2)
-library(tidyverse)
-library(stringr)
+library(dplyr)
 
-posterior <- as.matrix(out$samples)
+posterior <- as.matrix(out_m$samples)
 
-# Interval plots
-beta_params <- c("beta1", "beta3")
+# Figure 1 -- ecological drivers of growth
+eco_params <- c("beta1", "beta3")
 
-mcmc_intervals(posterior, pars = beta_params)+
+eco_plot <- mcmc_intervals(posterior, pars = eco_params) +
   scale_y_discrete(labels = c(
     "beta1" = "Drought Severity",
     "beta3" = "Flooded Forest Cover"
-  ))+
+  )) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
-  labs(title = "Posterior estimates for covariate effects",
-       subtitle = "50% and 95% credible intervals")
+  labs(
+    title    = "Ecological drivers of population growth",
+    subtitle = "50% and 95% credible intervals",
+    x        = "Effect on annual growth rate (log scale)"
+  ) +
+  theme_minimal()
 
-#lambda trends
-lambda_cols <- grep("lambda", colnames(posterior), value = TRUE)
+# Figure 2 -- social drivers of unreported fishing
+social_params <- c("beta7", "beta8")
 
-lambda_df <- posterior[, lambda_cols] %>%
-  as.data.frame() %>%
-  # Summarize posterior to median + credible intervals per parameter
-  summarise(across(everything(), list(
-    median = ~median(.),
-    lower  = ~quantile(., 0.025),
-    upper  = ~quantile(., 0.975)
-  ))) %>%
-  pivot_longer(everything(),
-               names_to  = c("param", ".value"),
-               names_pattern = "(.+)_(median|lower|upper)") %>%
-  # Parse arena and year out of the parameter name
-  # Adjust regex to match your naming convention e.g. "lambda[year,arena]"
-  mutate(
-    arena = str_extract(param, "(?<=,)\\d+(?=\\])") %>% as.integer(),
-    year  = str_extract(param, "(?<=\\[)\\d+") %>% as.integer()
-  )
+social_plot <- mcmc_intervals(posterior, pars = social_params) +
+  scale_y_discrete(labels = c(
+    "beta7" = "Poaching Frequency",
+    "beta8" = "Non-compliance"
+  )) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title    = "Social drivers of unreported fishing",
+    subtitle = "50% and 95% credible intervals",
+    x        = "Effect on probability of unreported fishing (logit scale)"
+  ) +
+  theme_minimal()
 
-arena_lookup <- c(
-  "1"  = "JA",
-  "2"  = "CO",
-  "3"  = "BC",
-  "4"  = "CS",
-  "5"  = "CR",
-  "6"  = "MU",
-  "7"  = "VE",
-  "8"  = "PV",
-  "9"  = "MI",
-  "10" = "JC",
-  "11" = "CA",
-  "12" = "SJ",
-  "13" = "CV",
-  "14" = "SE",
-  "15" = "JG",
-  "16" = "NP",
-  "17" = "PP",
-  "18" = "SS",
-  "19" = "JF"
+# Figure 3 -- arena-level p_unrep
+fa_lookup <- data.frame(
+  site    = c("BC", "CA", "CO", "CR", "CS", "CV", "JA", "JC", "JF",
+              "JG", "MI", "MU", "NP", "PP", "PV", "SE", "SJ", "SS", "VE"),
+  fa      = c("AP", "CA", "CO", "AP", "AP", "CV", "JA", "JC", "FB",
+              "JG", "AP", "AP", "FB", "FB", "PV", "SE", "SJ", "FB", "AP"),
+  fa_full = c("Auati-Parana", "Caruara", "Coraci", "Auati-Parana", 
+              "Auati-Parana", "Capivara", "Jaraua", "Jutai-Cleto", 
+              "Fonte Boa", "Jurupari", "Auati-Parana", "Auati-Parana",
+              "Fonte Boa", "Fonte Boa", "Parana Velho", "Seringa",
+              "Sao Jose", "Fonte Boa", "Auati-Parana")
 )
 
+library(RColorBrewer)
+n_fa <- length(unique(p_unrep_plot_df$fa_full))
+my_colors <- colorRampPalette(brewer.pal(8, "Set2"))(n_fa)
 
-year_lookup <- setNames(2018:2022, 1:years)
+p_unrep_plot_df <- data.frame(
+  site    = site.order,
+  mean    = out_m$mean$p_unrep,
+  lower   = out_m$q2.5$p_unrep,
+  upper   = out_m$q97.5$p_unrep,
+  lower50 = out_m$q25$p_unrep,
+  upper50 = out_m$q75$p_unrep
+) %>%
+  left_join(fa_lookup, by = "site") %>%
+  arrange(mean) %>%
+  mutate(site = factor(site, levels = site))
 
-lambda_df <- as.data.frame(posterior) %>%
-  select(starts_with("lambda")) %>%
-  summarise(across(everything(), list(
-    median = ~median(.),
-    lower  = ~quantile(., 0.025),
-    upper  = ~quantile(., 0.975)
-  ))) %>%
-  pivot_longer(everything(),
-               names_to  = c("param", ".value"),
-               names_pattern = "(.+)_(median|lower|upper)") %>%
-  mutate(
-    arena_idx = as.integer(str_extract(param, "(?<=\\[)\\d+")),
-    year_idx  = as.integer(str_extract(param, "(?<=,)\\d+(?=\\])")),
-    arena     = arena_lookup[as.character(arena_idx)],
-    year      = year_lookup[as.character(year_idx)]
-  ) %>%
-  filter(!is.na(arena) & !is.na(year))
-
-ggplot(lambda_df, aes(x = year, y = median,
-                      group = arena, color = arena)) +
-  geom_line() +
-  geom_ribbon(aes(ymin = lower, ymax = upper, fill = arena),
-              alpha = 0.15, color = NA) +
-  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
-  scale_color_viridis_d() +
-  scale_fill_viridis_d() +
-  scale_x_continuous(breaks = 2019:2022) +
-  labs(title = "Annual population growth rate (lambda) by SES arena",
-       x     = "Year",
-       y     = "Lambda",
-       color = "Arena",
-       fill  = "Arena") +
+p_unrep_plot <- ggplot(p_unrep_plot_df,
+                       aes(x = mean, y = site, color = fa_full)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper),
+                 height = 0, linewidth = 0.5) +
+  geom_errorbarh(aes(xmin = lower50, xmax = upper50),
+                 height = 0, linewidth = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  scale_x_continuous(limits = c(0, 1),
+                     labels = scales::percent_format()) +
+  scale_color_manual(values = my_colors,
+                     name = "Fishing Agreement") +
+  labs(
+    title    = "Estimated unreported fishing by arena",
+    subtitle = "Posterior mean with 50% and 95% credible intervals",
+    x        = "Probability of unreported fishing",
+    y        = NULL
+  ) +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(legend.position = "right")
 
+# print all three
+eco_plot
+social_plot
+p_unrep_plot
+```
+```{r p_unrep by arena}
 
 ratio_df <- data.frame(
   arena      = site.order,
@@ -650,332 +647,255 @@ ggplot(validation_df, aes(x     = mean_ratio,
        size  = "Certainty",
        title = "Model validation: p_unrep vs independent harvest pressure index") +
   theme_minimal()
+
+ggplot(p_unrep_final, aes(x = reorder(arena, p_unrep_mean), 
+                           y = p_unrep_mean,
+                           color = informed)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = p_unrep_2.5, ymax = p_unrep_97.5), 
+                width = 0.3) +
+  geom_hline(yintercept = mean(p_unrep_final$p_unrep_mean), 
+             linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
+                     labels = c("Uninformed", "Informed")) +
+  coord_flip() +
+  labs(x     = "SES Arena",
+       y     = "Estimated p_unrep",
+       color = "Prior type",
+       title = "Estimated unreported fishing rate by arena",
+       subtitle = "Points = posterior median, bars = 95% credible interval\nDashed line = system-wide mean") +
+  theme_minimal()
 ```
-#### Nimble versions 
-```{r Nimble}
-library(nimble)
+```{r p_unrep vs. perceived}
+# Reshape compliance data to long format with individual rule scores
+compliance_long <- data.frame(
+  arena     = per_comp2$SES.name,
+  compmgts  = scale(per_comp2$compmgts),
+  compmgtsea = scale(per_comp2$compmgtsea),
+  compmgtla = scale(per_comp2$compmgtla)
+) %>%
+  left_join(p_unrep_final, by = "arena") %>%
+  pivot_longer(cols      = c(compmgts, compmgtsea, compmgtla),
+               names_to  = "rule",
+               values_to = "compliance_score") %>%
+  mutate(rule = recode(rule,
+                       compmgts   = "Size limits",
+                       compmgtsea = "Seasonal limits",
+                       compmgtla  = "Lake-specific restrictions"))
 
-nimble_code <- nimbleCode({
-  r_mean      ~ dnorm(0.05, sd = 1.5)
-  sigma_r     ~ dnorm(0, sd = 1.5)        
-  tau_r       <- 1/pow(sigma_r, 2)
-  
-  beta1       ~ dnorm(beta1_prior, sd = beta1_prior_sd)
-  beta3       ~ dnorm(beta3_prior, sd = beta3_prior_sd)
-  beta5       ~ dnorm(0.5, sd = 1.5)     
-  beta7       ~ dnorm(0.5, sd = 1.5)      
-  #beta6       ~ dnorm(0.5, sd = 2)  
-  
-  mu_unrep    ~ dnorm(0, sd = 1.5)
-  sigma_unrep ~ dnorm(0, sd = 1)          
-  tau_unrep   <- 1/pow(sigma_unrep, 2)
-  
-# Ecological Process model
-    for (j in 1:arenas) {
-      N[j,1] ~ dpois(N_start[j]) 
-      r[j] ~ dnorm(r_mean, sigma_r) 
-      alpha_unrep[j] ~ dnorm(mu_unrep, sigma_unrep)  # arena-level baseline iuu
-      logit(p_unrep[j]) <- alpha_unrep[j] + beta5*noncompliance[j] + beta7*poaching[j] 
-          #inform p.unreported with compliance + poaching
-    
-    for (t in 2:(years)){
-      
-      U[j,t] ~ dbin(p_unrep[j], N[j,t-1]-E[j,t]) 
-      #binomial(probability of unreported fishing, number of fish not already reported as catch)
-
-      Ftot[j,t] <- E[j,t] + U[j,t] # legal + rule breaking and poaching 
-      
-      N_post_harvest[j,t] <- N[j,t-1] - Ftot[j,t]
-      
-      # Growth to next year
-     growth_rate[j,t] <- r[j] + 
-     (beta1 * Minw[station_id[j],t]) + 
-     (beta3 * Ff[j,t]) 
-      
-      N_expected[j,t] <- N_post_harvest[j,t] * exp(growth_rate[j,t])
-      N[j,t] ~ dpois(N_expected[j,t])
-    }
+# Correlation per rule
+cat("Spearman correlations by rule:\n")
+for(r in unique(compliance_long$rule)) {
+  sub <- compliance_long[compliance_long$rule == r, ]
+  ct  <- cor.test(sub$compliance_score, sub$p_unrep_mean, 
+                  method = "spearman")
+  cat(sprintf("%-25s r = %.3f, p = %.3f\n", r, ct$estimate, ct$p.value))
 }
 
-  # Proportion of the population actually sampled
-    for (j in 1:arenas){
-    for (t in 1:years){
-      w[j,t] <- ilogit(-beta6_fixed * p_area[j,t]) 
-      M[j,t] ~ dbin(w[j,t], N[j,t])
-    }
-  }
+ggplot(compliance_long, aes(x     = compliance_score,
+                             y     = p_unrep_mean,
+                             color = informed,
+                             label = arena)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = p_unrep_2.5, ymax = p_unrep_97.5),
+                width = 0.02, alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "gray30", linetype = "dashed") +
+  geom_text_repel(size = 2.5) +
+  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
+                     labels = c("Uninformed", "Informed")) +
+  facet_wrap(~rule, scales = "free_x") +
+  labs(x        = "Perceived noncompliance score",
+       y        = "Estimated p_unrep",
+       color    = "Prior type",
+       title    = "Estimated unreported fishing rate vs perceived noncompliance by rule",
+       subtitle = "Points = posterior median, bars = 95% credible interval") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+```
+```{r p_unrep vs. indirect}
+indirect_df <- indirect_estimates %>%
+  left_join(ses_code, by = c("idses" = "SES")) %>%
+  rename(arena = SES.name) %>%
+  left_join(p_unrep_final, by = "arena") %>%
+  mutate(rule = recode(rule,
+                       compmgts   = "Size limits",
+                       compmgtsea = "Closed season",
+                       compmgtla  = "Lake restrictions"))
 
-  # Observation model for C (counts) - regular binomial 
+# Correlation per rule
+cat("Spearman correlations by rule:\n")
+for(r in unique(indirect_df$rule)) {
+  sub <- indirect_df[indirect_df$rule == r, ]
+  ct  <- cor.test(sub$mean, sub$p_unrep_mean,
+                  method = "spearman")
+  cat(sprintf("%-25s r = %.3f, p = %.3f\n", r, ct$estimate, ct$p.value))
+}
 
-    p_obs ~ dbeta(14,6)
+#plotting without the CA outlier
+ggplot(indirect_df[-35,], aes(x     = mean,
+                         y     = p_unrep_mean,
+                         color = informed,
+                         label = arena)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = p_unrep_2.5, ymax = p_unrep_97.5),
+                width = 0.02, alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "gray30", linetype = "dashed") +
+  geom_text_repel(size = 2.5) +
+  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
+                     labels = c("Uninformed", "Informed")) +
+  facet_wrap(~rule, scales = "free_x") +
+  labs(x        = "Indirect rule-breaking estimate",
+       y        = "Estimated p_unrep",
+       color    = "Prior type",
+       title    = "Estimated unreported fishing rate vs indirect rule-breaking estimates",
+       subtitle = "Points = posterior median, bars = 95% credible interval") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+```
+```{r p_unrep vs. poaching}
+# Merge poaching index with p_unrep
+poaching_df <- data.frame(
+  arena        = site.order,
+  poach_index  = result$avg_top5_poach
+) %>%
+  left_join(p_unrep_final, by = "arena")
 
-    for (j in 1:arenas) {
-    for (t in 1:years){
-      
-      C[j,t] ~ dbin(p_obs , M[j,t])
-    }
-  }
-  
+# Spearman correlation
+cor_test_poach <- cor.test(poaching_df$poach_index,
+                            poaching_df$p_unrep_mean,
+                            method = "spearman")
+cat("Spearman correlation p_unrep vs poaching index:\n")
+cat(sprintf("r = %.3f, p = %.3f\n", 
+            cor_test_poach$estimate, 
+            cor_test_poach$p.value))
 
-  # Derived quantities
-    for (j in 1:arenas) {
-    for (t in 1:(years-1)) {
-    lambda[j,t+1] <- N[j,t+1]/N[j,t]
-    }
-  }
-})
+ggplot(poaching_df, aes(x     = poach_index,
+                         y     = p_unrep_mean,
+                         color = informed,
+                         label = arena)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = p_unrep_2.5, ymax = p_unrep_97.5),
+                width = 0.5, alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "gray30", linetype = "dashed") +
+  geom_text_repel(size = 3) +
+  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
+                     labels = c("Uninformed", "Informed")) +
+  annotate("text",
+           x     = max(poaching_df$poach_index, na.rm = TRUE),
+           y     = max(poaching_df$p_unrep_97.5, na.rm = TRUE),
+           hjust = 1, vjust = 1, size = 3.5,
+           label = sprintf("Spearman r = %.3f, p = %.3f",
+                           cor_test_poach$estimate,
+                           cor_test_poach$p.value)) +
+  labs(x        = "Poaching index (mean days poached for top 5 lakes)",
+       y        = "Estimated p_unrep",
+       color    = "Prior type",
+       title    = "Estimated unreported fishing rate vs poaching index",
+       subtitle = "Points = posterior median, bars = 95% credible interval") +
+  theme_minimal()
+```
+Ecological model (truncated)
+```{r eco mod last5}
+library(rjags)
+library(jagsUI)
 
-nimble_model <- nimbleModel(
-  code    = nimble_code,
-  data    = list(C = C, E = E, p_area = P, Minw = Wl_min_scaled,
-                 Ff = ff_scaled, noncompliance = noncompliance_scale,
-                 poaching = poach_scale),
-  constants = list(
-  arenas          = arenas,
-  years           = years,
-  station_id      = station_id,
-  N_start         = N_start_realistic,
-  r_prior         = r_prior,
-  r_prior_sd      = r_prior_sd,
-  r_mean_prior    = r_hyperpriors$r_mean_est,
-  r_mean_prior_sd = r_hyperpriors$r_mean_sd * 2,
-  sigma_r_prior   = r_hyperpriors$sigma_r_est,
-  sigma_r_prior_sd = r_hyperpriors$sigma_r_sd * 2,
-  beta1_prior     = beta_priors$beta1_mean,
-  beta1_prior_sd  = beta_priors$beta1_sd * 2,
-  beta3_prior     = beta_priors$beta3_mean,
-  beta3_prior_sd  = beta_priors$beta3_sd * 2,
-  beta6_fixed     = beta_priors$beta6_fixed
-),
-  inits   = list(
-    N           = N_sim,
-    M           = M_sim,
-    U           = U_sim,
-    r_mean      = 0.05,
-    sigma_r     = 0.2,
-    r           = rep(0.05, arenas),
-    beta1       = 0,
-    beta3       = 0,
-    beta5       = 0.5,
-   # beta6       = 0.2,
-    beta7       = 0.5,
-    mu_unrep    = 0,
-    sigma_unrep = 0.3,
-    alpha_unrep = rep(0, arenas),
-    p_obs       = 0.7
-  )
+data.bundle_eco <- list(
+  C            = C,
+  E            = E,
+  p_area       = P,
+  Minw         = Wl_min_scaled,
+  Ff           = ff_scaled,
+  arenas       = arenas,
+  years        = years,
+  station_id   = station_id,
+  N_start      = data.bundle_m$N_start,
+  r_prior_mean = r_prior_m2$r_mean,
+  r_prior_sd   = r_prior_m2$r_sd,
+  beta1_prior  = beta_priors$beta1_mean,
+  beta1_prior_sd = beta_priors$beta1_sd * 2,
+  beta3_prior  = beta_priors$beta3_mean,
+  beta3_prior_sd = beta_priors$beta3_sd * 2,
+  beta6_prior  = beta_priors$beta6_mean,
+  beta6_prior_sd = beta_priors$beta6_sd * 2
 )
-# Configure joint sampler on N and U together
-conf <- configureMCMC(nimble_model)
-conf$removeSamplers(c("N", "U"))
 
-for(j in 1:arenas) {
-  conf$addSampler(target = paste0("N[", j, ", 1]"), type = "slice")
-  for(t in 2:years) {
-    # Sample U and N jointly at each time step
-    conf$addSampler(target = c(paste0("U[", j, ",", t, "]"),
-                               paste0("N[", j, ",", t, "]")),
-                    type = "AF_slice")  # AF_slice handles mixed discrete/continuous
-  }
-}
+modfile_eco <- "model_eco_last5.txt"
+writeLines("
+model {
+  beta1 ~ dnorm(beta1_prior, 1/pow(beta1_prior_sd, 2))
+  beta3 ~ dnorm(beta3_prior, 1/pow(beta3_prior_sd, 2))
+  beta6 ~ dnorm(beta6_prior, 1/pow(beta6_prior_sd, 2))T(0,)
 
+  for (j in 1:arenas) {
+    N[j,1] ~ dpois(N_start[j])
+    r[j] ~ dnorm(r_prior_mean[j], 1/pow(r_prior_sd[j], 2))T(-0.5, 0.5)
 
-mcmc <- buildMCMC(conf)
-compiled_model <- compileNimble(nimble_model)
-compiled_mcmc  <- compileNimble(mcmc, project = nimble_model)
-
-samples <- runMCMC(compiled_mcmc,
-                   niter   = 200000,
-                   nburnin = 100000,
-                   thin    = 75,
-                   nchains = 3)
-library(coda)
-samples_coda <- as.mcmc.list(lapply(samples, as.mcmc))
-```
-nimble outputs
-```{r}
-library(coda)
-library(bayesplot)
-library(ggplot2)
-
-posterior_matrix <- as.matrix(samples_coda)
-
-key_params <- c("beta1", "beta3", "beta5", "beta7","mu_unrep", "sigma_unrep")
-
-# Rhat and n.eff
-gelman <- gelman.diag(samples_coda, multivariate = FALSE)
-eff    <- effectiveSize(samples_coda)
-
-cat("=== Convergence diagnostics ===\n")
-for(p in key_params) {
-  idx <- grep(paste0("^", p, "$"), rownames(gelman$psrf))
-  if(length(idx) > 0) {
-    cat(sprintf("%-15s Rhat: %.4f   n.eff: %.0f\n",
-                p, gelman$psrf[idx, 1], eff[idx]))
-  }
-}
-
-# Traceplots
-mcmc_trace(posterior_matrix, pars = key_params)
-
-# Posterior intervals
-mcmc_intervals(posterior_matrix, pars = c("beta1", "beta3")) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
-  labs(title = "Posterior estimates for growth covariates")
-
-# Density plots
-mcmc_areas(posterior_matrix, pars = key_params, prob = 0.95) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "red")
-
-# Posterior summary table
-sum_stats <- summary(samples_coda)
-print(round(sum_stats$statistics[key_params, ], 4))
-print(round(sum_stats$quantiles[key_params, ], 4))
-```
-Model 2 - no covariates
-```{r}
-nimble_code_m2 <- nimbleCode({
-  r_mean      ~ dnorm(r_mean_prior, sd = r_mean_prior_sd)
-  sigma_r     ~ T(dnorm(sigma_r_prior, sd = sigma_r_prior_sd), 0, Inf)
-  tau_r       <- 1/pow(sigma_r, 2)
-  beta1       ~ dnorm(beta1_prior, sd = beta1_prior_sd)
-  beta3       ~ dnorm(beta3_prior, sd = beta3_prior_sd)
-  
-  # Single global p_unrep - no covariates yet
-  mu_unrep    ~ dnorm(0, sd = 1.5)
-  sigma_unrep ~ T(dnorm(0, sd = 1), 0, Inf)
-
-  for(j in 1:arenas) {
-    r[j]           ~ dnorm(r_prior[j], sd = r_prior_sd[j])
-    N[j,1]         ~ dpois(N_start[j])
-    alpha_unrep[j] ~ dnorm(mu_unrep, sd = sigma_unrep)
-    logit(p_unrep[j]) <- alpha_unrep[j]  # no covariates
-
-    for(t in 2:years) {
-      U[j,t]              ~ dbin(p_unrep[j], N[j,t-1] - E[j,t])
-      Ftot[j,t]           <- E[j,t] + U[j,t]
-      N_post_harvest[j,t] <- N[j,t-1] - Ftot[j,t]
-      growth_rate[j,t]    <- r[j] + 
-                             beta1*Minw[station_id[j],t] + 
-                             beta3*Ff[j,t]
-      N_expected[j,t]     <- N_post_harvest[j,t] * exp(growth_rate[j,t])
-      N[j,t]              ~ dpois(N_expected[j,t])
+    for (t in 1:(years-1)){
+      N_post_harvest[j,t] <- N[j,t] - E[j,t]
+      growth_rate[j,t]    <- r[j] +
+                             (beta1 * Minw[station_id[j],t]) +
+                             (beta3 *Ff[j,t])
+      N_expected[j,t+1]   <- N_post_harvest[j,t] * exp(growth_rate[j,t])
+      N[j,t+1]            ~ dpois(N_expected[j,t+1])
     }
   }
 
-  for(j in 1:arenas) {
-    for(t in 1:years) {
-      w[j,t] <- ilogit(-beta6_fixed * p_area[j,t])
-      M[j,t] ~ dbin(w[j,t], N[j,t])
+  for (j in 1:arenas){
+    for (t in 1:years){
+      w[j,t]   <- ilogit(-beta6 * p_area[j,t])
+      M[j,t]   ~ dbin(w[j,t], N[j,t])
+    }
+  }
+
+  p_obs <- 0.85
+
+  for (j in 1:arenas) {
+    for (t in 1:years){
       C[j,t] ~ dbin(p_obs, M[j,t])
     }
   }
 
-  p_obs ~ dbeta(14, 6)
-
-  for(j in 1:arenas) {
-    for(t in 2:years) {
-      lambda[j,t] <- N[j,t] / N[j,t-1]
+  for (j in 1:arenas) {
+    for (t in 1:(years-1)) {
+      lambda[j,t+1] <- N[j,t+1]/N[j,t]
     }
   }
-})
+}
+", con = modfile_eco)
 
-nimble_model_m2 <- nimbleModel(
-  code    = nimble_code_m2,
-  data    = list(C = C, E = E, p_area = P, Minw = Wl_min_scaled,
-                 Ff = ff_scaled, noncompliance = noncompliance_scale,
-                 poaching = poach_scale),
-  constants = list(
-  arenas          = arenas,
-  years           = years,
-  station_id      = station_id,
-  N_start         = N_start_realistic,
-  r_prior         = r_prior,
-  r_prior_sd      = r_prior_sd,
-  r_mean_prior    = r_hyperpriors$r_mean_est,
-  r_mean_prior_sd = r_hyperpriors$r_mean_sd * 2,
-  sigma_r_prior   = r_hyperpriors$sigma_r_est,
-  sigma_r_prior_sd = r_hyperpriors$sigma_r_sd * 2,
-  beta1_prior     = beta_priors$beta1_mean,
-  beta1_prior_sd  = beta_priors$beta1_sd * 2,
-  beta3_prior     = beta_priors$beta3_mean,
-  beta3_prior_sd  = beta_priors$beta3_sd * 2,
-  beta6_fixed     = beta_priors$beta6_fixed
-),
-  inits   = list(
-    N           = N_sim,
-    M           = M_sim,
-    U           = U_sim,
-    r_mean      = 0.05,
-    sigma_r     = 0.2,
-    r           = rep(0.05, arenas),
-    beta1       = 0,
-    beta3       = 0,
-    mu_unrep    = 0,
-    sigma_unrep = 0.3,
-    alpha_unrep = rep(0, arenas),
-    p_obs       = 0.7
+inits_eco <- function() {
+  list(
+    N     = N_sim,
+    M     = M_sim,
+    r     = rnorm(arenas, r_prior_m2$r_mean, 0.01),
+    beta1 = rnorm(1, beta_priors$beta1_mean, 0.001),
+    beta3 = rnorm(1, beta_priors$beta3_mean, 0.001),
+    beta6 = rnorm(1, beta_priors$beta6_mean, 0.01)
   )
-)
-# Configure joint sampler on N and U together
-conf2 <- configureMCMC(nimble_model_m2)
-conf2$removeSamplers(c("N", "U"))
-
-for(j in 1:arenas) {
-  conf2$addSampler(target = paste0("N[", j, ", 1]"), type = "slice")
-  for(t in 2:years) {
-    # Sample U and N jointly at each time step
-    conf2$addSampler(target = c(paste0("U[", j, ",", t, "]"),
-                               paste0("N[", j, ",", t, "]")),
-                    type = "AF_slice")
-  }
 }
 
+parameters_eco <- c("beta1", "beta3", "beta6", "lambda", "N", "r")
 
-mcmc2 <- buildMCMC(conf2)
-compiled_model2 <- compileNimble(nimble_model_m2)
-compiled_mcmc2  <- compileNimble(mcmc2, project = nimble_model_m2)
-
-samples2 <- runMCMC(compiled_mcmc2,
-                   niter   = 200000,
-                   nburnin = 100000,
-                   thin    = 75,
-                   nchains = 3)
-library(coda)
-samples_coda2 <- as.mcmc.list(lapply(samples2, as.mcmc))
-
-#Outputs
-posterior_matrix2 <- as.matrix(samples_coda2)
-
-key_params2 <- c("beta1", "beta3","mu_unrep", "sigma_unrep")
-
-# Rhat and n.eff
-gelman2 <- gelman.diag(samples_coda2, multivariate = FALSE)
-eff2    <- effectiveSize(samples_coda2)
-
-cat("=== Convergence diagnostics ===\n")
-for(p in key_params2) {
-  idx <- grep(paste0("^", p, "$"), rownames(gelman2$psrf))
-  if(length(idx) > 0) {
-    cat(sprintf("%-15s Rhat: %.4f   n.eff: %.0f\n",
-                p, gelman2$psrf[idx, 1], eff2[idx]))
-  }
-}
-
-# Traceplots
-mcmc_trace(posterior_matrix2, pars = key_params2)
-
-# Posterior intervals
-mcmc_intervals(posterior_matrix2, pars = c("beta1", "beta3", "mu_unrep")) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
-  labs(title = "Posterior estimates for growth covariates")
-
-# Density plots
-mcmc_areas(posterior_matrix2, pars = key_params2, prob = 0.95) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "red")
-
-# Posterior summary table
-sum_stats2 <- summary(samples_coda2)
-print(round(sum_stats2$statistics[key_params2, ], 4))
-print(round(sum_stats2$quantiles[key_params2, ], 4))
+out_eco <- jags(data = data.bundle_eco,
+                inits = inits_eco,
+                parameters.to.save = parameters_eco,
+                model.file = modfile_eco,
+                n.chains = 3,
+                n.adapt = 30000,
+                n.iter = 200000,
+                n.burnin = 100000,
+                n.thin = 75,
+                parallel = TRUE) 
+```
+```{r model comparison}
+# DIC comparison 
+cat("Ecological model DIC:", out_eco$DIC, "\n")
+cat("Full model DIC:       ", out_m$DIC, "\n")
+cat("Delta DIC:            ", out_eco$DIC - out_m$DIC, "\n")
+# WAIC deviance comparison
+cat("Ecological model deviance:", out_eco$mean$deviance, "\n")
+cat("Full model deviance:      ", out_m$mean$deviance, "\n")
 ```
