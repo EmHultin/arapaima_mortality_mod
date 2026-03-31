@@ -82,10 +82,13 @@ poach_index <- poach_raw %>%
 ```{r indirect}
 iq_estimates <- readRDS("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/priors/indirect_estimates.rds")
 #combining size and season as an index (lake was not correlated)
-iq_index <- iq_estimates %>%
+iq_estimates_clean <- iq_estimates %>%
+  filter(!(rule == "compmgtsea" & idses == 6))
+
+iq_index_clean <- iq_estimates_clean %>%
   filter(rule %in% c("compmgts", "compmgtsea")) %>%
   group_by(idses) %>%
-  summarise(incompliance_harvest = mean(mean, na.rm = TRUE), .groups = "drop") %>%
+  summarise(incompliance_harvest = mean(mean, na.rm=TRUE), .groups="drop") %>%
   left_join(ses_code, by = c("idses" = "SES")) %>%
   mutate(SES.name = factor(SES.name, levels = site.order)) %>%
   arrange(SES.name) %>%
@@ -265,7 +268,7 @@ data.bundle_m <- list(
   C                = C,
   E                = E,
   p_area           = P,
-  indirect         = iq_index$incompliance_scaled,
+  indirect         = iq_index_clean$incompliance_scaled,
   poaching         = poach_index$poach_scaled,
   Minw             = Wl_min_scaled,
   Ff               = ff_scaled,
@@ -426,7 +429,7 @@ Diagnostics
 #install.packages("jagshelper")
 library(jagshelper)
 
-key_params <- c("beta1", "beta3", "beta6", "p_unrep")
+key_params <- c("beta1", "beta3", "beta6", "beta7", "beta8", "p_unrep")
 
 for (param in key_params) {
   if (param %in% rownames(out_m$summary)) {
@@ -466,13 +469,19 @@ p_unrep_sds   <- out_m$sd$p_unrep
 
 p_unrep_final <- data.frame(
   arena        = site.order,
-  p_unrep_mean = round(p_unrep_means, 4),
-  p_unrep_sd   = round(p_unrep_sds, 4),
-  p_unrep_2.5  = round(out_m$q2.5$p_unrep, 4),
-  p_unrep_97.5 = round(out_m$q97.5$p_unrep, 4)
-) %>% arrange(desc(p_unrep_mean))
+  p_unrep_mean = out_m$mean$p_unrep,
+  p_unrep_sd   = out_m$sd$p_unrep,
+  p_unrep_2.5  = out_m$q2.5$p_unrep,
+  p_unrep_97.5 = out_m$q97.5$p_unrep
+) %>%
+  mutate(
+    informed = case_when(
+      arena %in% site.order.m1 ~ "Informed",
+      TRUE                     ~ "Less informed"
+    )
+  )
 
-p_unrep_final
+identical(p_unrep_final$p_unrep_mean, out_m$mean$p_unrep)
 
 
 # Check convergence across all N nodes
@@ -499,7 +508,7 @@ lambda_ch3   <- data.frame(
 #saveRDS(lambda_ch3,  "priors/lambda_ch3.rds")
 
 ```
-```{r }
+```{r key outputs }
 saveRDS(out_m, "model2_full_results.rds")
 
 # full convergence summary
@@ -513,7 +522,7 @@ traceplot(out_m, parameters = c("beta7", "beta8", "beta6",
 ```
 
 Plots
-```{r posterior & lambda plots}
+```{r posterior lambda plots}
 library(bayesplot)
 library(ggplot2)
 library(dplyr)
@@ -566,8 +575,7 @@ fa_lookup <- data.frame(
 )
 
 library(RColorBrewer)
-n_fa <- length(unique(p_unrep_plot_df$fa_full))
-my_colors <- colorRampPalette(brewer.pal(8, "Set2"))(n_fa)
+
 
 p_unrep_plot_df <- data.frame(
   site    = site.order,
@@ -579,7 +587,16 @@ p_unrep_plot_df <- data.frame(
 ) %>%
   left_join(fa_lookup, by = "site") %>%
   arrange(mean) %>%
-  mutate(site = factor(site, levels = site))
+  mutate(site = factor(site, levels = site)) %>%
+  mutate(
+    informed = case_when(
+      site %in% site.order.m1 ~ "Informed",
+      TRUE                    ~ "Less informed"
+    )
+  )
+
+n_fa <- length(unique(p_unrep_plot_df$fa_full))
+my_colors <- colorRampPalette(brewer.pal(8, "Set2"))(n_fa)
 
 p_unrep_plot <- ggplot(p_unrep_plot_df,
                        aes(x = mean, y = site, color = fa_full)) +
@@ -608,7 +625,8 @@ social_plot
 p_unrep_plot
 ```
 ```{r p_unrep by arena}
-
+library(ggplot2)
+library(ggrepel)
 ratio_df <- data.frame(
   arena      = site.order,
   mean_ratio = sapply(1:arenas, function(j) {
@@ -639,8 +657,10 @@ ggplot(validation_df, aes(x     = mean_ratio,
                 width = 0.02, alpha = 0.5) +
   geom_text_repel(size = 3) +
   geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
-  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
-                     labels = c("FALSE" = "Uninformed", "TRUE" = "Informed")) +
+ scale_color_manual(
+    values = c("Informed" = "steelblue", "Less informed" = "orange"),
+    name   = "Prior type"
+  ) +
   labs(x     = "Mean harvest / prior year count",
        y     = "Estimated p_unrep",
        color = "Prior type",
@@ -656,8 +676,10 @@ ggplot(p_unrep_final, aes(x = reorder(arena, p_unrep_mean),
                 width = 0.3) +
   geom_hline(yintercept = mean(p_unrep_final$p_unrep_mean), 
              linetype = "dashed", color = "gray50") +
-  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
-                     labels = c("Uninformed", "Informed")) +
+   scale_color_manual(
+    values = c("Informed" = "steelblue", "Less informed" = "orange"),
+    name   = "Prior type"
+  ) +
   coord_flip() +
   labs(x     = "SES Arena",
        y     = "Estimated p_unrep",
@@ -666,136 +688,144 @@ ggplot(p_unrep_final, aes(x = reorder(arena, p_unrep_mean),
        subtitle = "Points = posterior median, bars = 95% credible interval\nDashed line = system-wide mean") +
   theme_minimal()
 ```
-```{r p_unrep vs. perceived}
-# Reshape compliance data to long format with individual rule scores
-compliance_long <- data.frame(
-  arena     = per_comp2$SES.name,
-  compmgts  = scale(per_comp2$compmgts),
-  compmgtsea = scale(per_comp2$compmgtsea),
-  compmgtla = scale(per_comp2$compmgtla)
-) %>%
-  left_join(p_unrep_final, by = "arena") %>%
-  pivot_longer(cols      = c(compmgts, compmgtsea, compmgtla),
-               names_to  = "rule",
-               values_to = "compliance_score") %>%
-  mutate(rule = recode(rule,
-                       compmgts   = "Size limits",
-                       compmgtsea = "Seasonal limits",
-                       compmgtla  = "Lake-specific restrictions"))
+```{r social variable comparison}
+library(tidyr)
+# define predictors and labels
+predictors <- c("compmgts", "compmgtsea", "compmgtla",
+                "perc_size", "perc_sea", "perc_lake",
+                "poach_raw")
+labels <- c("IQ: Size limits", "IQ: Seasonal limits", 
+            "IQ: Lake restrictions",
+            "Perception: Size limits", "Perception: Seasonal limits",
+            "Perception: Lake restrictions",
+            "Poaching frequency")
 
-# Correlation per rule
-cat("Spearman correlations by rule:\n")
-for(r in unique(compliance_long$rule)) {
-  sub <- compliance_long[compliance_long$rule == r, ]
-  ct  <- cor.test(sub$compliance_score, sub$p_unrep_mean, 
-                  method = "spearman")
-  cat(sprintf("%-25s r = %.3f, p = %.3f\n", r, ct$estimate, ct$p.value))
+social_compare <- p_unrep_final %>%
+  # add IQ scores by rule (cleaned)
+  left_join(
+    iq_estimates_clean %>%
+      select(idses, rule, mean) %>%
+      pivot_wider(names_from = rule, values_from = mean) %>%
+      left_join(ses_code, by = c("idses" = "SES")) %>%
+      rename(arena = SES.name),
+    by = "arena"
+  ) %>%
+  # add community perceptions by rule
+  left_join(
+    data.frame(
+      arena      = per_comp2$SES.name,
+      perc_size  = per_comp2$compmgts,
+      perc_sea   = per_comp2$compmgtsea,
+      perc_lake  = per_comp2$compmgtla
+    ),
+    by = "arena"
+  ) %>%
+  # add poaching
+  left_join(
+    data.frame(
+      arena         = site.order,
+      poach_scaled  = data.bundle_m$poaching,
+      poach_raw     = poach_index$top5_poach
+    ),
+    by = "arena"
+  )
+
+# check
+colnames(social_compare)
+nrow(social_compare)
+
+run_correlations <- function(df, p_unrep_col, predictors, labels){
+  results <- data.frame(
+    predictor = labels,
+    r         = NA,
+    p         = NA,
+    n         = NA
+  )
+  for(i in seq_along(predictors)){
+    x <- df[[predictors[i]]]
+    y <- df[[p_unrep_col]]
+    keep <- !is.na(x) & !is.na(y)
+    ct <- cor.test(x[keep], y[keep], method = "spearman")
+    results$r[i] <- round(ct$estimate, 3)
+    results$p[i] <- round(ct$p.value, 3)
+    results$n[i] <- sum(keep)
+  }
+  return(results)
 }
+corr_results <- run_correlations(social_compare, "p_unrep_mean", predictors, labels)
+print(corr_results)
 
-ggplot(compliance_long, aes(x     = compliance_score,
-                             y     = p_unrep_mean,
-                             color = informed,
-                             label = arena)) +
+
+social_long <- social_compare %>%
+  pivot_longer(
+    cols      = all_of(predictors),
+    names_to  = "predictor",
+    values_to = "score"
+  ) %>%
+  mutate(
+    predictor_label = recode(predictor,
+      compmgts   = "IQ: Size limits",
+      compmgtsea = "IQ: Seasonal limits",
+      compmgtla  = "IQ: Lake restrictions",
+      perc_size  = "Perception: Size limits",
+      perc_sea   = "Perception: Seasonal limits",
+      perc_lake  = "Perception: Lake restrictions",
+      poach_raw  = "Poaching frequency"
+    ),
+    measure_type = case_when(
+      grepl("^IQ", predictor_label)          ~ "Indirect Questioning",
+      grepl("^Perception", predictor_label)  ~ "Community Perception",
+      TRUE                                   ~ "Poaching"
+    )
+  )
+
+library(dplyr)
+
+r2_df <- social_long %>%
+  filter(!is.na(score) & !is.na(p_unrep_mean)) %>%
+  group_by(predictor_label) %>%
+  summarise(
+    r2    = round(summary(lm(p_unrep_mean ~ score))$r.squared, 3),
+    pval  = round(summary(lm(p_unrep_mean ~ score))$coefficients[2, 4], 3),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    label        = paste0("R² = ", r2, ", p = ", pval),
+    score        = -Inf,
+    p_unrep_mean = Inf
+  )
+
+social_plot <- ggplot(social_long, 
+                      aes(x = score, y = p_unrep_mean,
+                          color = informed, label = arena)) +
   geom_point(size = 2) +
   geom_errorbar(aes(ymin = p_unrep_2.5, ymax = p_unrep_97.5),
-                width = 0.02, alpha = 0.5) +
+                width = 0.02, alpha = 0.4) +
   geom_smooth(method = "lm", se = TRUE,
               color = "gray30", linetype = "dashed") +
   geom_text_repel(size = 2.5) +
-  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
-                     labels = c("Uninformed", "Informed")) +
-  facet_wrap(~rule, scales = "free_x") +
-  labs(x        = "Perceived noncompliance score",
-       y        = "Estimated p_unrep",
-       color    = "Prior type",
-       title    = "Estimated unreported fishing rate vs perceived noncompliance by rule",
-       subtitle = "Points = posterior median, bars = 95% credible interval") +
+  geom_text(data    = r2_df,
+            aes(x= score, y= p_unrep_mean, label = label),
+            hjust   = -0.05,
+            vjust   = 1.5,
+            color   = "gray20",
+            size    = 3,
+            inherit.aes = FALSE) +
+  scale_color_manual(
+    values = c("Informed" = "steelblue", "Less informed" = "orange"),
+    name   = "Prior type"
+  ) +
+  facet_wrap(~predictor_label, scales = "free_x", ncol = 3) +
+  labs(
+    x        = "Social predictor score",
+    y        = "Estimated unreported fishing (p_unrep)",
+    title    = "Estimated unreported fishing vs social predictors",
+    subtitle = "Points = posterior mean, bars = 95% CI"
+  ) +
   theme_minimal() +
   theme(strip.text = element_text(face = "bold"))
-```
-```{r p_unrep vs. indirect}
-indirect_df <- indirect_estimates %>%
-  left_join(ses_code, by = c("idses" = "SES")) %>%
-  rename(arena = SES.name) %>%
-  left_join(p_unrep_final, by = "arena") %>%
-  mutate(rule = recode(rule,
-                       compmgts   = "Size limits",
-                       compmgtsea = "Closed season",
-                       compmgtla  = "Lake restrictions"))
 
-# Correlation per rule
-cat("Spearman correlations by rule:\n")
-for(r in unique(indirect_df$rule)) {
-  sub <- indirect_df[indirect_df$rule == r, ]
-  ct  <- cor.test(sub$mean, sub$p_unrep_mean,
-                  method = "spearman")
-  cat(sprintf("%-25s r = %.3f, p = %.3f\n", r, ct$estimate, ct$p.value))
-}
-
-#plotting without the CA outlier
-ggplot(indirect_df[-35,], aes(x     = mean,
-                         y     = p_unrep_mean,
-                         color = informed,
-                         label = arena)) +
-  geom_point(size = 2) +
-  geom_errorbar(aes(ymin = p_unrep_2.5, ymax = p_unrep_97.5),
-                width = 0.02, alpha = 0.5) +
-  geom_smooth(method = "lm", se = TRUE,
-              color = "gray30", linetype = "dashed") +
-  geom_text_repel(size = 2.5) +
-  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
-                     labels = c("Uninformed", "Informed")) +
-  facet_wrap(~rule, scales = "free_x") +
-  labs(x        = "Indirect rule-breaking estimate",
-       y        = "Estimated p_unrep",
-       color    = "Prior type",
-       title    = "Estimated unreported fishing rate vs indirect rule-breaking estimates",
-       subtitle = "Points = posterior median, bars = 95% credible interval") +
-  theme_minimal() +
-  theme(strip.text = element_text(face = "bold"))
-```
-```{r p_unrep vs. poaching}
-# Merge poaching index with p_unrep
-poaching_df <- data.frame(
-  arena        = site.order,
-  poach_index  = result$avg_top5_poach
-) %>%
-  left_join(p_unrep_final, by = "arena")
-
-# Spearman correlation
-cor_test_poach <- cor.test(poaching_df$poach_index,
-                            poaching_df$p_unrep_mean,
-                            method = "spearman")
-cat("Spearman correlation p_unrep vs poaching index:\n")
-cat(sprintf("r = %.3f, p = %.3f\n", 
-            cor_test_poach$estimate, 
-            cor_test_poach$p.value))
-
-ggplot(poaching_df, aes(x     = poach_index,
-                         y     = p_unrep_mean,
-                         color = informed,
-                         label = arena)) +
-  geom_point(size = 3) +
-  geom_errorbar(aes(ymin = p_unrep_2.5, ymax = p_unrep_97.5),
-                width = 0.5, alpha = 0.5) +
-  geom_smooth(method = "lm", se = TRUE,
-              color = "gray30", linetype = "dashed") +
-  geom_text_repel(size = 3) +
-  scale_color_manual(values = c("FALSE" = "orange", "TRUE" = "steelblue"),
-                     labels = c("Uninformed", "Informed")) +
-  annotate("text",
-           x     = max(poaching_df$poach_index, na.rm = TRUE),
-           y     = max(poaching_df$p_unrep_97.5, na.rm = TRUE),
-           hjust = 1, vjust = 1, size = 3.5,
-           label = sprintf("Spearman r = %.3f, p = %.3f",
-                           cor_test_poach$estimate,
-                           cor_test_poach$p.value)) +
-  labs(x        = "Poaching index (mean days poached for top 5 lakes)",
-       y        = "Estimated p_unrep",
-       color    = "Prior type",
-       title    = "Estimated unreported fishing rate vs poaching index",
-       subtitle = "Points = posterior median, bars = 95% credible interval") +
-  theme_minimal()
+social_plot
 ```
 Ecological model (truncated)
 ```{r eco mod last5}
@@ -898,4 +928,68 @@ cat("Delta DIC:            ", out_eco$DIC - out_m$DIC, "\n")
 # WAIC deviance comparison
 cat("Ecological model deviance:", out_eco$mean$deviance, "\n")
 cat("Full model deviance:      ", out_m$mean$deviance, "\n")
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# extract lambda posteriors from both models
+year_lookup <- setNames(2019:2022, 2:5)  # lambda starts at t=2
+
+extract_lambda <- function(out, model_name, site_order){
+  lambda_mean <- out$mean$lambda
+  lambda_low  <- out$q2.5$lambda
+  lambda_high <- out$q97.5$lambda
+  lambda_low50  <- out$q25$lambda
+  lambda_high50 <- out$q75$lambda
+  
+  # convert to long format, skip t=1 (undefined)
+  df <- expand.grid(j = 1:length(site_order), t = 2:5) %>%
+    mutate(
+      site        = site_order[j],
+      year        = year_lookup[as.character(t)],
+      mean        = mapply(function(j,t) lambda_mean[j,t], j, t),
+      lower       = mapply(function(j,t) lambda_low[j,t],  j, t),
+      upper       = mapply(function(j,t) lambda_high[j,t], j, t),
+      lower50     = mapply(function(j,t) lambda_low50[j,t],  j, t),
+      upper50     = mapply(function(j,t) lambda_high50[j,t], j, t),
+      model       = model_name
+    ) %>%
+    select(-j, -t)
+  return(df)
+}
+
+lambda_mort <- extract_lambda(out_m,   "Full model",       site.order)
+lambda_eco  <- extract_lambda(out_eco, "Ecological only",  site.order)
+
+lambda_both <- rbind(lambda_mort, lambda_eco) %>%
+  left_join(fa_lookup[, c("site", "fa_full")], by = "site")
+
+# plot
+ggplot(lambda_both, aes(x = year, y = mean, color = model, fill = model)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, color = NA) +
+  geom_ribbon(aes(ymin = lower50, ymax = upper50), alpha = 0.30, color = NA) +
+  geom_line() +
+  geom_point(size = 1.5) +
+  scale_color_manual(values = c("Full model" = "steelblue", 
+                                "Ecological only" = "coral"),
+                     name = "Model") +
+  scale_fill_manual(values  = c("Full model" = "steelblue",
+                                "Ecological only" = "coral"),
+                    name = "Model") +
+  scale_x_continuous(breaks = 2019:2022) +
+  facet_wrap(~site, ncol = 5) +
+  labs(
+    x        = "Year",
+    y        = "Population growth rate (lambda)",
+    title    = "Annual population growth rate by arena",
+    subtitle = "50% and 95% credible intervals | Dashed line = stable population (lambda = 1)"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text       = element_text(face = "bold"),
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    legend.position  = "bottom"
+  )
 ```
