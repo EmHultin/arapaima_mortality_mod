@@ -97,18 +97,35 @@ iq_index_clean <- iq_estimates_clean %>%
 # Ecological variables
 ```{r catch/count}
 arenas <- 19 #all of them!
-years <- 5 #2018-2022, just the last 5
-count <- read.csv("smoothedcounts_v1.csv")
-count <- count[,-1]
-colnames(count) <- c("SES", 1999:2023)
-last5 <- count[,c(1,21:25)]
+years <- 5 #2018-2022, just the last 5 (relative to the survey)
+shared_model_years <- as.character(2006:2022)
+
+#old_count <- read.csv("smoothedcounts_v1.csv")
+#count <- count[,-1]
+#colnames(count) <- c("SES", 1999:2023)
+#count_best <- count[-c(4,7:8,10:11,16:17),]
+SES_counts <- read.csv("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/smoothedcounts_4_2_26.csv", check.names = FALSE)
+rownames(SES_counts) <- SES_counts[,1]
+
+#updating with Pris' data
+missing_mam <- read.csv("catch_count_year_SES.csv")
+pris_ja <- missing_mam[, c(1, 6, 8)] %>%
+  setNames(c("SES", "year", "adult_count")) %>%
+  filter(SES == "JA") %>%
+  arrange(year)
+pris_ja_vec <- pris_ja$adult_count[match(shared_model_years,as.character(pris_ja$year))]
+SES_counts["JA", shared_model_years] <- pris_ja_vec
+
+model_years_m2 <- as.character(2018:2022)
+C <- round(as.matrix(SES_counts[site.order, model_years_m2]))  # all 19 arenas
+storage.mode(C) <- "numeric"
 
 catch= read.csv("catch_count_year_SES_12_3.csv")
 quota_catch <- catch[,c(1,4,7,8)]
 quota_catch <- quota_catch[-184,]
 c1 <- quota_catch[, c(1,2,4)]
 colnames(c1) <- c("SES", "year", "report_catchtotal")
-missing_mam <- read.csv("catch_count_year_SES.csv")
+#missing_mam <- read.csv("catch_count_year_SES.csv")
 mam_catch <- missing_mam[,c(1,6,9)]
 c2<- rbind(c1, mam_catch)
 c3<- dplyr::distinct(c2)
@@ -116,25 +133,16 @@ c3.5<- c3[-c(138,140),]
 c4<- c3.5[order(c3.5$year, decreasing= FALSE),]
 c5 <- tidyr::pivot_wider(c4, names_from = "year", values_from = "report_catchtotal")
 
-site.order <- unique(c5$SES[1:19])
-C <- last5[match(site.order, last5$SES), ]
-C <- as.matrix(round(C[,2:6])) # 2018:2022
-rownames(C) <- site.order
-
-E <- c5[match(site.order, c5$SES), c(1, 21:25)]
+E <- c5[match(site.order, c5$SES), ]
+E <- E[, model_years_m2]  
 E[is.na(E)] <- 0
-E <- as.matrix(E[, -1])
+E <- as.matrix(E)
 storage.mode(E) <- "numeric"
+rownames(E) <- site.order
 
-#proportion of total lake area surveyed each year
-prop_surveyed <- read.csv("propSES_surveyed_byyear_FIXED.csv")
-prop_surveyed <- prop_surveyed[match(site.order, prop_surveyed$SES),] 
-rownames(prop_surveyed) <- site.order
-P <- prop_surveyed[, c("SES", "X2018", "X2019", "X2020", "X2021", "X2022")]
-P[is.na(P)] <- 0
-P <- as.matrix(P[, -1])
-storage.mode(P) <- "numeric"
-
+w_input <- read.csv("C:/Users/emmah6/OneDrive - Virginia Tech/Github/arapaima_phenom_mod/w_productivity_weighted_19.csv", row.names = "SES", check.names = FALSE)
+W <- as.matrix(w_input[site.order, model_years_m2])
+storage.mode(W) <- "numeric"
 ```
 ```{r min water level}
 library(dplyr)
@@ -221,7 +229,7 @@ rownames(ff_scaled) <- site.order
 ```{r data bundle/initial sim}
 # Detection parameters for initialization
 p_obs_fixed  <- 0.85
-beta6_target <- 0.485
+#beta6_target <- 0.485
 p_unrep_start <- 0.17
 logit_start   <- log(p_unrep_start / (1 - p_unrep_start))
 
@@ -229,8 +237,7 @@ logit_start   <- log(p_unrep_start / (1 - p_unrep_start))
 N_implied <- matrix(NA, nrow=arenas, ncol=years)
 for(j in 1:arenas){
   for(t in 1:years){
-    w_implied      <- plogis(-beta6_target * P[j,t])
-    N_implied[j,t] <- ceiling(C[j,t] / (w_implied * p_obs_fixed))
+    N_implied[j,t] <- ceiling(C[j,t] / (W[j,t] * p_obs_fixed))
   }
 }
 
@@ -241,7 +248,7 @@ U_sim <- matrix(NA, nrow=arenas, ncol=years-1)
 
 for(j in 1:arenas){
   for(t in 1:years){
-    w_sim      <- plogis(-beta6_target * P[j,t])
+    w_sim      <- max(W[j,t], 0.01)
     M_sim[j,t] <- max(ceiling(C[j,t] / p_obs_fixed), C[j,t] + 5)
     N_sim[j,t] <- max(ceiling(M_sim[j,t] / w_sim), M_sim[j,t] + 10)
     if(E[j,t] > 0){
@@ -267,7 +274,7 @@ storage.mode(U_sim) <- "numeric"
 data.bundle_m <- list(
   C                = C,
   E                = E,
-  p_area           = P,
+  w_fixed          = W,
   indirect         = iq_index_clean$incompliance_scaled,
   poaching         = poach_index$poach_scaled,
   Minw             = Wl_min_scaled,
@@ -281,9 +288,7 @@ data.bundle_m <- list(
   beta1_prior      = beta_priors$beta1_mean,
   beta1_prior_sd   = beta_priors$beta1_sd * 2,
   beta3_prior      = beta_priors$beta3_mean,
-  beta3_prior_sd   = beta_priors$beta3_sd * 2,
-  beta6_prior      = beta_priors$beta6_mean,
-  beta6_prior_sd   = beta_priors$beta6_sd * 2
+  beta3_prior_sd   = beta_priors$beta3_sd * 2
 )
 ```
 3 tier model
@@ -303,7 +308,6 @@ model {
 
   beta1 ~ dnorm(beta1_prior, 1/pow(beta1_prior_sd, 2))
   beta3 ~ dnorm(beta3_prior, 1/pow(beta3_prior_sd, 2))
-  beta6 ~ dnorm(beta6_prior, 1/pow(beta6_prior_sd, 2))T(0,)
 
   mu_unrep    ~ dnorm(0, 1/pow(1.5, 2))
   sigma_unrep ~ dnorm(0, 1/pow(1, 2))T(0,)
@@ -354,8 +358,8 @@ for (j in 1:arenas) {
   #---------------------------------------------------
  for (j in 1:arenas){
     for (t in 1:years){
-      w[j,t] <- ilogit(-beta6 * p_area[j,t]) 
-      M[j,t] ~ dbin(w[j,t], N[j,t])
+      
+      M[j,t] ~ dbin(w_fixed[j,t], N[j,t])
     }
   }
   #---------------------------------------------------
@@ -396,7 +400,6 @@ inits_m <- function() {
     r           = rnorm(arenas, r_hyperpriors$r_mean_est, 0.01),
     beta1       = rnorm(1, beta_priors$beta1_mean, 0.001),
     beta3       = rnorm(1, beta_priors$beta3_mean, 0.001),
-    beta6       = rnorm(1, beta_priors$beta6_mean, 0.01),
     beta8       = runif(1,0,0.1),
     beta7       = runif(1,0,0.1),
     mu_unrep    = rnorm(1, logit_start, 0.1),
@@ -408,8 +411,8 @@ inits_m <- function() {
 }
 
 # Parameters to monitor
-parameters_m <- c("beta1", "beta3", "beta6", "beta8", "beta7", "mu_unrep", 
-                "sigma_unrep", "p_unrep", "lambda", "N", "r", "phi", "intercept")
+parameters_m <- c("beta1", "beta3", "beta8", "beta7", "mu_unrep", 
+                "sigma_unrep", "p_unrep", "lambda", "N", "U", "r", "phi", "intercept")
 
 out_m <- jags(data = data.bundle_m,
             inits = inits_m,
@@ -429,7 +432,7 @@ Diagnostics
 #install.packages("jagshelper")
 library(jagshelper)
 
-key_params <- c("beta1", "beta3", "beta6", "beta7", "beta8", "p_unrep")
+key_params <- c("beta1", "beta3", "beta7", "beta8")
 
 for (param in key_params) {
   if (param %in% rownames(out_m$summary)) {
@@ -509,6 +512,8 @@ lambda_ch3   <- data.frame(
 
 ```
 ```{r key outputs }
+
+library(jagsUI)
 saveRDS(out_m, "model2_full_results.rds")
 
 # full convergence summary
@@ -516,7 +521,7 @@ check_neff(out_m, 200)
 check_Rhat(out_m)
 
 # traceplots for key parameters
-traceplot(out_m, parameters = c("beta7", "beta8", "beta6", 
+traceplot(out_m, parameters = c("beta7", "beta8",  
                                  "intercept", "phi"))
 
 ```
@@ -597,9 +602,13 @@ p_unrep_plot_df <- data.frame(
 
 n_fa <- length(unique(p_unrep_plot_df$fa_full))
 my_colors <- colorRampPalette(brewer.pal(8, "Set2"))(n_fa)
+fa_levels <- unique(p_unrep_plot_df$fa_full)
+available_shapes <- c(16, 17, 15, 18, 8, 10, 7, 11, 12, 13, 14)
+fa_shapes <- setNames(available_shapes[1:length(fa_levels)], fa_levels)
+
 
 p_unrep_plot <- ggplot(p_unrep_plot_df,
-                       aes(x = mean, y = site, color = fa_full)) +
+                       aes(x = mean, y = site, color = fa_full, shape= fa_full)) +
   geom_point(size = 3) +
   geom_errorbarh(aes(xmin = lower, xmax = upper),
                  height = 0, linewidth = 0.5) +
@@ -609,7 +618,9 @@ p_unrep_plot <- ggplot(p_unrep_plot_df,
   scale_x_continuous(limits = c(0, 1),
                      labels = scales::percent_format()) +
   scale_color_manual(values = my_colors,
-                     name = "Fishing Agreement") +
+                     name = "Fishing Agreement")+
+  scale_shape_manual(values = fa_shapes,
+                     name   = "Fishing Agreement") +
   labs(
     title    = "Estimated unreported fishing by arena",
     subtitle = "Posterior mean with 50% and 95% credible intervals",
@@ -688,74 +699,50 @@ ggplot(p_unrep_final, aes(x = reorder(arena, p_unrep_mean),
        subtitle = "Points = posterior median, bars = 95% credible interval\nDashed line = system-wide mean") +
   theme_minimal()
 ```
-```{r social variable comparison}
+```{r perceptions data comparison}
 library(tidyr)
-# define predictors and labels
-predictors <- c("compmgts", "compmgtsea", "compmgtla",
-                "perc_size", "perc_sea", "perc_lake",
-                "poach_raw")
-labels <- c("IQ: Size limits", "IQ: Seasonal limits", 
-            "IQ: Lake restrictions",
-            "Perception: Size limits", "Perception: Seasonal limits",
-            "Perception: Lake restrictions",
-            "Poaching frequency")
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+# Perceptions data only - independent from model inputs
+# (IQ and poaching were used in the model, perceptions were not)
+predictors <- c("perc_size", "perc_sea", "perc_lake")
+labels     <- c("Perception: Size limits", 
+                "Perception: Seasonal limits",
+                "Perception: Lake restrictions")
 
 social_compare <- p_unrep_final %>%
-  # add IQ scores by rule (cleaned)
-  left_join(
-    iq_estimates_clean %>%
-      select(idses, rule, mean) %>%
-      pivot_wider(names_from = rule, values_from = mean) %>%
-      left_join(ses_code, by = c("idses" = "SES")) %>%
-      rename(arena = SES.name),
-    by = "arena"
-  ) %>%
-  # add community perceptions by rule
   left_join(
     data.frame(
-      arena      = per_comp2$SES.name,
-      perc_size  = per_comp2$compmgts,
-      perc_sea   = per_comp2$compmgtsea,
-      perc_lake  = per_comp2$compmgtla
-    ),
-    by = "arena"
-  ) %>%
-  # add poaching
-  left_join(
-    data.frame(
-      arena         = site.order,
-      poach_scaled  = data.bundle_m$poaching,
-      poach_raw     = poach_index$top5_poach
+      arena     = per_comp2$SES.name,
+      perc_size = per_comp2$compmgts,
+      perc_sea  = per_comp2$compmgtsea,
+      perc_lake = per_comp2$compmgtla
     ),
     by = "arena"
   )
 
-# check
-colnames(social_compare)
-nrow(social_compare)
-
-run_correlations <- function(df, p_unrep_col, predictors, labels){
-  results <- data.frame(
-    predictor = labels,
-    r         = NA,
-    p         = NA,
-    n         = NA
-  )
-  for(i in seq_along(predictors)){
-    x <- df[[predictors[i]]]
-    y <- df[[p_unrep_col]]
+# Spearman correlations
+run_correlations <- function(df, p_unrep_col, predictors, labels) {
+  results <- data.frame(predictor = labels, r = NA, p = NA, n = NA)
+  for(i in seq_along(predictors)) {
+    x    <- df[[predictors[i]]]
+    y    <- df[[p_unrep_col]]
     keep <- !is.na(x) & !is.na(y)
-    ct <- cor.test(x[keep], y[keep], method = "spearman")
+    ct   <- cor.test(x[keep], y[keep], method = "spearman")
     results$r[i] <- round(ct$estimate, 3)
     results$p[i] <- round(ct$p.value, 3)
     results$n[i] <- sum(keep)
   }
   return(results)
 }
-corr_results <- run_correlations(social_compare, "p_unrep_mean", predictors, labels)
+
+corr_results <- run_correlations(social_compare, "p_unrep_mean", 
+                                  predictors, labels)
 print(corr_results)
 
-
+# R2 labels for facets
 social_long <- social_compare %>%
   pivot_longer(
     cols      = all_of(predictors),
@@ -764,29 +751,18 @@ social_long <- social_compare %>%
   ) %>%
   mutate(
     predictor_label = recode(predictor,
-      compmgts   = "IQ: Size limits",
-      compmgtsea = "IQ: Seasonal limits",
-      compmgtla  = "IQ: Lake restrictions",
-      perc_size  = "Perception: Size limits",
-      perc_sea   = "Perception: Seasonal limits",
-      perc_lake  = "Perception: Lake restrictions",
-      poach_raw  = "Poaching frequency"
-    ),
-    measure_type = case_when(
-      grepl("^IQ", predictor_label)          ~ "Indirect Questioning",
-      grepl("^Perception", predictor_label)  ~ "Community Perception",
-      TRUE                                   ~ "Poaching"
+      perc_size = "Perception: Size limits",
+      perc_sea  = "Perception: Seasonal limits",
+      perc_lake = "Perception: Lake restrictions"
     )
   )
-
-library(dplyr)
 
 r2_df <- social_long %>%
   filter(!is.na(score) & !is.na(p_unrep_mean)) %>%
   group_by(predictor_label) %>%
   summarise(
-    r2    = round(summary(lm(p_unrep_mean ~ score))$r.squared, 3),
-    pval  = round(summary(lm(p_unrep_mean ~ score))$coefficients[2, 4], 3),
+    r2   = round(summary(lm(p_unrep_mean ~ score))$r.squared, 3),
+    pval = round(summary(lm(p_unrep_mean ~ score))$coefficients[2, 4], 3),
     .groups = "drop"
   ) %>%
   mutate(
@@ -795,21 +771,20 @@ r2_df <- social_long %>%
     p_unrep_mean = Inf
   )
 
-social_plot <- ggplot(social_long, 
-                      aes(x = score, y = p_unrep_mean,
-                          color = informed, label = arena)) +
+# Plot
+ggplot(social_long,
+       aes(x = score, y = p_unrep_mean,
+           color = informed, label = arena)) +
   geom_point(size = 2) +
   geom_errorbar(aes(ymin = p_unrep_2.5, ymax = p_unrep_97.5),
                 width = 0.02, alpha = 0.4) +
   geom_smooth(method = "lm", se = TRUE,
               color = "gray30", linetype = "dashed") +
   geom_text_repel(size = 2.5) +
-  geom_text(data    = r2_df,
-            aes(x= score, y= p_unrep_mean, label = label),
-            hjust   = -0.05,
-            vjust   = 1.5,
-            color   = "gray20",
-            size    = 3,
+  geom_text(data = r2_df,
+            aes(x = score, y = p_unrep_mean, label = label),
+            hjust = -0.05, vjust = 1.5,
+            color = "gray20", size = 3,
             inherit.aes = FALSE) +
   scale_color_manual(
     values = c("Informed" = "steelblue", "Less informed" = "orange"),
@@ -817,15 +792,13 @@ social_plot <- ggplot(social_long,
   ) +
   facet_wrap(~predictor_label, scales = "free_x", ncol = 3) +
   labs(
-    x        = "Social predictor score",
+    x        = "Community perception of non-compliance",
     y        = "Estimated unreported fishing (p_unrep)",
-    title    = "Estimated unreported fishing vs social predictors",
-    subtitle = "Points = posterior mean, bars = 95% CI"
+    title    = "Estimated unreported fishing vs independent non-compliance perceptions",
+    subtitle = "Points = posterior mean, bars = 95% CI | Perceptions data not used in model"
   ) +
   theme_minimal() +
   theme(strip.text = element_text(face = "bold"))
-
-social_plot
 ```
 Ecological model (truncated)
 ```{r eco mod last5}
@@ -835,7 +808,7 @@ library(jagsUI)
 data.bundle_eco <- list(
   C            = C,
   E            = E,
-  p_area       = P,
+  w_fixed      = W,
   Minw         = Wl_min_scaled,
   Ff           = ff_scaled,
   arenas       = arenas,
@@ -847,9 +820,7 @@ data.bundle_eco <- list(
   beta1_prior  = beta_priors$beta1_mean,
   beta1_prior_sd = beta_priors$beta1_sd * 2,
   beta3_prior  = beta_priors$beta3_mean,
-  beta3_prior_sd = beta_priors$beta3_sd * 2,
-  beta6_prior  = beta_priors$beta6_mean,
-  beta6_prior_sd = beta_priors$beta6_sd * 2
+  beta3_prior_sd = beta_priors$beta3_sd * 2
 )
 
 modfile_eco <- "model_eco_last5.txt"
@@ -857,7 +828,7 @@ writeLines("
 model {
   beta1 ~ dnorm(beta1_prior, 1/pow(beta1_prior_sd, 2))
   beta3 ~ dnorm(beta3_prior, 1/pow(beta3_prior_sd, 2))
-  beta6 ~ dnorm(beta6_prior, 1/pow(beta6_prior_sd, 2))T(0,)
+  #beta6 ~ dnorm(beta6_prior, 1/pow(beta6_prior_sd, 2))T(0,)
 
   for (j in 1:arenas) {
     N[j,1] ~ dpois(N_start[j])
@@ -875,8 +846,8 @@ model {
 
   for (j in 1:arenas){
     for (t in 1:years){
-      w[j,t]   <- ilogit(-beta6 * p_area[j,t])
-      M[j,t]   ~ dbin(w[j,t], N[j,t])
+      
+      M[j,t]   ~ dbin(w_fixed[j,t], N[j,t])
     }
   }
 
@@ -902,12 +873,11 @@ inits_eco <- function() {
     M     = M_sim,
     r     = rnorm(arenas, r_prior_m2$r_mean, 0.01),
     beta1 = rnorm(1, beta_priors$beta1_mean, 0.001),
-    beta3 = rnorm(1, beta_priors$beta3_mean, 0.001),
-    beta6 = rnorm(1, beta_priors$beta6_mean, 0.01)
+    beta3 = rnorm(1, beta_priors$beta3_mean, 0.001)
   )
 }
 
-parameters_eco <- c("beta1", "beta3", "beta6", "lambda", "N", "r")
+parameters_eco <- c("beta1", "beta3", "lambda", "N", "r")
 
 out_eco <- jags(data = data.bundle_eco,
                 inits = inits_eco,
@@ -921,44 +891,97 @@ out_eco <- jags(data = data.bundle_eco,
                 parallel = TRUE) 
 ```
 ```{r model comparison}
-# DIC comparison 
-cat("Ecological model DIC:", out_eco$DIC, "\n")
-cat("Full model DIC:       ", out_m$DIC, "\n")
-cat("Delta DIC:            ", out_eco$DIC - out_m$DIC, "\n")
-# WAIC deviance comparison
-cat("Ecological model deviance:", out_eco$mean$deviance, "\n")
-cat("Full model deviance:      ", out_m$mean$deviance, "\n")
+# Compare lambda estimates between models
+N_eco_mean  <- apply(out_eco$sims.list$N, c(2,3), mean)
+N_full_mean <- apply(out_m$sims.list$N,   c(2,3), mean)
 
-library(ggplot2)
-library(dplyr)
-library(tidyr)
+# Lambda from each model
+lambda_eco  <- N_eco_mean[,  2:5] / N_eco_mean[,  1:4]
+lambda_full <- N_full_mean[, 2:5] / N_full_mean[, 1:4]
 
-# extract lambda posteriors from both models
-year_lookup <- setNames(2019:2022, 2:5)  # lambda starts at t=2
+rownames(lambda_eco)  <- site.order
+rownames(lambda_full) <- site.order
+colnames(lambda_eco)  <- colnames(lambda_full) <- as.character(2019:2022)
 
+# Mean lambda by arena across years
+lambda_compare <- data.frame(
+  arena       = site.order,
+  lambda_eco  = rowMeans(lambda_eco,  na.rm=TRUE),
+  lambda_full = rowMeans(lambda_full, na.rm=TRUE)
+) %>%
+  mutate(
+    diff     = lambda_full - lambda_eco,
+    informed = ifelse(arena %in% site.order.m1, "Informed", "Less informed")
+  ) %>%
+  arrange(desc(abs(diff)))
+
+print(lambda_compare)
+
+# Is lambda systematically different between models?
+cat("\nMean lambda - eco:", round(mean(lambda_eco), 3), "\n")
+cat("Mean lambda - full:", round(mean(lambda_full), 3), "\n")
+cat("Mean difference:", round(mean(lambda_compare$diff), 3), "\n")
+
+# Plot lambda comparison by arena
+lambda_compare_long <- lambda_compare %>%
+  pivot_longer(
+    cols      = c(lambda_eco, lambda_full),
+    names_to  = "model",
+    values_to = "lambda"
+  ) %>%
+  mutate(
+    model = recode(model,
+      lambda_eco  = "Ecological only",
+      lambda_full = "Full model"
+    )
+  )
+
+ggplot(lambda_compare_long, 
+       aes(x = reorder(arena, lambda), y = lambda, 
+           color = model, shape = informed)) +
+  geom_point(size = 3) +
+  geom_line(aes(group = arena), color = "gray70", linewidth = 0.5) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  scale_color_manual(
+    values = c("Ecological only" = "coral",
+               "Full model"      = "steelblue"),
+    name = "Model"
+  ) +
+  scale_shape_manual(
+    values = c("Informed" = 16, "Less informed" = 17),
+    name = "Prior type"
+  ) +
+  coord_flip() +
+  labs(
+    x        = "SES Arena",
+    y        = "Mean annual population growth rate (lambda)",
+    title    = "Effect of accounting for unreported fishing on lambda",
+    subtitle = "Lines connect same arena across models | Red dashed = stable population"
+  ) +
+  theme_minimal()
+```
+```{r population trends}
+year_lookup <- setNames(2019:2022, 2:5)
 extract_lambda <- function(out, model_name, site_order){
-  lambda_mean <- out$mean$lambda
-  lambda_low  <- out$q2.5$lambda
-  lambda_high <- out$q97.5$lambda
+  lambda_mean   <- out$mean$lambda
+  lambda_low    <- out$q2.5$lambda
+  lambda_high   <- out$q97.5$lambda
   lambda_low50  <- out$q25$lambda
   lambda_high50 <- out$q75$lambda
-  
-  # convert to long format, skip t=1 (undefined)
   df <- expand.grid(j = 1:length(site_order), t = 2:5) %>%
     mutate(
-      site        = site_order[j],
-      year        = year_lookup[as.character(t)],
-      mean        = mapply(function(j,t) lambda_mean[j,t], j, t),
-      lower       = mapply(function(j,t) lambda_low[j,t],  j, t),
-      upper       = mapply(function(j,t) lambda_high[j,t], j, t),
-      lower50     = mapply(function(j,t) lambda_low50[j,t],  j, t),
-      upper50     = mapply(function(j,t) lambda_high50[j,t], j, t),
-      model       = model_name
+      site    = site_order[j],
+      year    = year_lookup[as.character(t)],
+      mean    = mapply(function(j,t) lambda_mean[j,t],   j, t),
+      lower   = mapply(function(j,t) lambda_low[j,t],    j, t),
+      upper   = mapply(function(j,t) lambda_high[j,t],   j, t),
+      lower50 = mapply(function(j,t) lambda_low50[j,t],  j, t),
+      upper50 = mapply(function(j,t) lambda_high50[j,t], j, t),
+      model   = model_name
     ) %>%
     select(-j, -t)
   return(df)
 }
-
 lambda_mort <- extract_lambda(out_m,   "Full model",       site.order)
 lambda_eco  <- extract_lambda(out_eco, "Ecological only",  site.order)
 
@@ -991,5 +1014,182 @@ ggplot(lambda_both, aes(x = year, y = mean, color = model, fill = model)) +
     strip.text       = element_text(face = "bold"),
     axis.text.x      = element_text(angle = 45, hjust = 1),
     legend.position  = "bottom"
+  )
+```
+```{r U vs E}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+
+# Extract posterior mean and CI for U
+U_mean  <- apply(out_m$sims.list$U, c(2,3), mean)
+U_lower <- apply(out_m$sims.list$U, c(2,3), quantile, 0.025)
+U_upper <- apply(out_m$sims.list$U, c(2,3), quantile, 0.975)
+
+rownames(U_mean) <- rownames(U_lower) <- rownames(U_upper) <- site.order
+colnames(U_mean) <- colnames(U_lower) <- colnames(U_upper) <- as.character(2018:2021)
+n_sims <- dim(out_m$sims.list$p_unrep)[1]
+U_2022_sims <- matrix(NA, nrow = n_sims, ncol = arenas)
+
+for(j in 1:arenas) {
+  N_2022    <- out_m$sims.list$N[, j, 5]      # posterior N for year 5 (2022)
+  E_2022    <- E[j, 5]                          # observed harvest 2022
+  p_unrep_j <- out_m$sims.list$p_unrep[, j]   # posterior p_unrep
+  avail     <- pmax(round(N_2022) - E_2022, 0) # available fish
+  U_2022_sims[, j] <- rbinom(n_sims, avail, p_unrep_j)
+}
+
+# Summarize
+U_2022_mean  <- apply(U_2022_sims, 2, mean)
+U_2022_lower <- apply(U_2022_sims, 2, quantile, 0.025)
+U_2022_upper <- apply(U_2022_sims, 2, quantile, 0.975)
+
+# ============================================================
+# Extend existing U arrays to include 2022
+# ============================================================
+
+# Current U arrays are [arenas x 4] (2018-2021)
+# Add 2022 as a 5th column
+U_mean_full  <- cbind(U_mean,  U_2022_mean)
+U_lower_full <- cbind(U_lower, U_2022_lower)
+U_upper_full <- cbind(U_upper, U_2022_upper)
+
+colnames(U_mean_full) <- colnames(U_lower_full) <- 
+  colnames(U_upper_full) <- as.character(2018:2022)
+
+rownames(U_mean_full) <- rownames(U_lower_full) <- 
+  rownames(U_upper_full) <- site.order
+
+# Verify
+cat("U_mean_full dimensions:", dim(U_mean_full), "\n")  # should be 19 x 5
+round(U_mean_full["JA", ])  # check JA looks reasonable
+
+# ============================================================
+# Rebuild harvest_long with full 2018:2022 E and U
+# ============================================================
+
+# E for all 5 years
+E_sub <- E[, 1:5]
+colnames(E_sub) <- as.character(2018:2022)
+
+harvest_long <- bind_rows(
+  # Reported harvest
+  as.data.frame(E_sub) %>%
+    mutate(arena = site.order) %>%
+    pivot_longer(-arena, names_to = "year", values_to = "value") %>%
+    mutate(type = "Reported (E)", lower = value, upper = value),
+  
+  # Unreported harvest
+  as.data.frame(U_mean_full) %>%
+    mutate(arena = site.order) %>%
+    pivot_longer(-arena, names_to = "year", values_to = "value") %>%
+    left_join(
+      as.data.frame(U_lower_full) %>%
+        mutate(arena = site.order) %>%
+        pivot_longer(-arena, names_to = "year", values_to = "lower"),
+      by = c("arena", "year")
+    ) %>%
+    left_join(
+      as.data.frame(U_upper_full) %>%
+        mutate(arena = site.order) %>%
+        pivot_longer(-arena, names_to = "year", values_to = "upper"),
+      by = c("arena", "year")
+    ) %>%
+    mutate(type = "Unreported (U)")
+) %>%
+  mutate(
+    year     = as.integer(year),
+    arena    = factor(arena, levels = site.order),
+    informed = ifelse(arena %in% site.order.m1, "Informed", "Less informed")
+  )
+harvest_long <- harvest_long %>%
+  mutate(
+    x_pos = as.numeric(factor(year)) + 
+             ifelse(type == "Reported (E)", -0.18, 0.18)
+  )
+
+u_only <- harvest_long %>% 
+  filter(type == "Unreported (U)")
+
+ggplot(harvest_long, aes(x = x_pos, y = value, fill = type)) +
+  geom_bar(stat = "identity", width = 0.35) +
+  geom_errorbar(
+    data = u_only,
+    aes(x = x_pos, ymin = lower, ymax = upper),
+    inherit.aes = FALSE,
+    width = 0.15, 
+    color = "gray20", 
+    linewidth = 0.5
+  ) +
+  scale_x_continuous(
+    breaks = 1:5,
+    labels = as.character(2018:2022)
+  ) +
+  scale_fill_manual(
+    values = c("Reported (E)"   = "steelblue",
+               "Unreported (U)" = "coral"),
+    name = "Harvest type"
+  ) +
+  facet_wrap(~arena, ncol = 5, scales = "free_y") +
+  labs(
+    x        = "Year",
+    y        = "Number of fish",
+    title    = "Reported vs estimated unreported harvest by arena",
+    subtitle = "Error bars show 95% CI on unreported harvest estimate"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text      = element_text(face = "bold"),
+    axis.text.x     = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+
+# ============================================================
+# Plot 2 - Ratio of unreported to total harvest
+# ============================================================
+ratio_long <- data.frame(
+  arena  = rep(site.order, 5),
+  year   = rep(2018:2022, each = arenas),
+  E      = as.vector(E_sub),
+  U_mean = as.vector(U_mean_full),   # changed from U_mean
+  U_low  = as.vector(U_lower_full),  # changed from U_lower
+  U_high = as.vector(U_upper_full)   # changed from U_upper
+) %>%
+  mutate(
+    total      = E + U_mean,
+    ratio_mean = ifelse(total > 0, U_mean / total, NA),
+    ratio_low  = ifelse(total > 0, U_low  / (E + U_low),  NA),
+    ratio_high = ifelse(total > 0, U_high / (E + U_high), NA),
+    arena      = factor(arena, levels = site.order),
+    informed   = ifelse(arena %in% site.order.m1, "Informed", "Less informed")
+  )
+
+
+ggplot(ratio_long, aes(x = year, y = ratio_mean, 
+                        color = arena, fill = arena)) +
+  geom_ribbon(aes(ymin = ratio_low, ymax = ratio_high), 
+              alpha = 0.2, color = NA) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", 
+             color = "red", linewidth = 0.5) +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d() +
+  scale_y_continuous(labels = scales::percent_format(),
+                     limits = c(0, 1)) +
+  scale_x_continuous(breaks = 2018:2022) +
+  facet_wrap(~arena, ncol = 5) +
+  labs(
+    x        = "Year",
+    y        = "Unreported harvest as % of total harvest",
+    title    = "Proportion of total harvest that is unreported",
+    subtitle = "Red dashed = 50% unreported | Ribbons show 95% CI"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text      = element_text(face = "bold"),
+    axis.text.x     = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
   )
 ```
